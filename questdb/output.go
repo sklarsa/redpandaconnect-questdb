@@ -4,7 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
+	"strings"
+	"time"
 
 	qdb "github.com/questdb/go-questdb-client/v3"
 	"github.com/redpanda-data/benthos/v4/public/service"
@@ -26,21 +27,35 @@ func clientFields() []*service.ConfigField {
 		service.NewBoolField("skipUnsupportedTypes").
 			Description("Skips unsupported types").
 			Default(false),
-		service.NewStringField("timestampField").
-			Description("Name of the designated timestamp field"),
+		service.NewStringField("designatedTimestampField").
+			Description("Name of the designated timestamp field").
+			Optional(),
+		service.NewStringField("designatedTimestampUnits").
+			Description("Designated timestamp field units").
+			Default("auto").
+			LintRule(`root = if ["nanos","micros","millis","seconds","auto"].contains(this) != true { [ "valid options are \"nanos\", \"micros\", \"millis\", \"seconds\", \"auto\"" ] }`).
+			Optional(),
+		service.NewStringListField("timestampStringFields").
+			Description("String fields with textual timestamps").
+			Optional(),
+		service.NewStringField("timestampStringFormat").
+			Description("Timestamp format, used when parsing timestamp string fields. Specified in golang's time.Parse layout").
+			Default(time.StampMicro + "Z0700").
+			Optional(),
 		service.NewStringListField("symbols").
-			Description("Columns that should be the SYMBOL type (string values default to STRING)"),
+			Description("Columns that should be the SYMBOL type (string values default to STRING)").
+			Optional(),
 	}
 }
 
 func questdbOutputConfig() *service.ConfigSpec {
 	return service.NewConfigSpec().
-		Summary(`Pushes messages a QuestDB table`).
+		Summary("Pushes messages a QuestDB table").
 		Description(`The field `+"`key`"+` supports xref:configuration:interpolation.adoc#bloblang-queries[interpolation functions], allowing you to create a unique key for each message.`+service.OutputPerformanceDocs(true, true)).
 		Categories("Services").
 		Fields(clientFields()...).
 		Fields(
-			service.NewOutputMaxInFlightField().Default(75000),
+			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(loFieldBatching),
 		)
 }
@@ -50,36 +65,45 @@ type questdbWriter struct {
 
 	key *service.InterpolatedString
 
-	senderCtor func(ctx context.Context) (qdb.LineSender, error)
-	senderMut  sync.RWMutex
-	sender     qdb.LineSender
-	table      string
+	senderCtor func(ctx context.Context) (*qdb.LineSenderPool, error)
+
+	pool *qdb.LineSenderPool
+
+	skipUnsupportedTypes bool
+	symbols              map[string]bool
+	table                string
+	timestampField       string
 }
 
 func (q *questdbWriter) Connect(ctx context.Context) error {
-	q.senderMut.Lock()
-	defer q.senderMut.Unlock()
-	sender, err := q.senderCtor(ctx)
+	pool, err := q.senderCtor(ctx)
 	if err != nil {
 		return err
 	}
-	q.sender = sender
+	q.pool = pool
 	return nil
 }
 
 func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
-	q.senderMut.Lock()
-	defer q.senderMut.Unlock()
-	sender := q.sender
-	if sender == nil {
-		return service.ErrNotConnected
+	sender, err := q.pool.Acquire(ctx)
+	if err != nil {
+		q.log.Errorf("QuestDB error: %v\n", err)
+		return err
 	}
-	batchSize := len(batch)
-	for i := 0; i < batchSize; i++ {
-		q.log.Debugf("Writing message %v", i)
+
+	defer func() {
+		err := q.pool.Release(ctx, sender)
+		if err != nil {
+			q.log.Errorf("QuestDB error: %v\n", err)
+		}
+	}()
+
+	for i, msg := range batch {
+		q.log.Tracef("Writing message %v", i)
+
+		var designatedTimestamp time.Time
 
 		sender.Table(q.table)
-		msg := batch[i]
 
 		fields := map[string]any{}
 
@@ -90,6 +114,17 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		}
 
 		for k, v := range fields {
+
+			if _, found := q.symbols[k]; found {
+				sender.Symbol(k, fmt.Sprintf("%v", v))
+				continue
+			}
+
+			if k == q.timestampField {
+				// todo: parse designated timestamp based on type
+				panic("not implemented")
+			}
+
 			switch val := v.(type) {
 			case string:
 				sender.StringColumn(k, val)
@@ -116,14 +151,24 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				// todo: flatten nested JSON object
 				q.log.Errorf("Unsupported type %T for field %v", v, k)
 			default:
-				q.log.Errorf("Unsupported type %T for field %v", v, k)
+				msg := fmt.Sprintf("Unsupported type %T for field %v", v, k)
+				if q.skipUnsupportedTypes {
+					q.log.Warn(msg)
+				} else {
+					q.log.Errorf(msg)
+				}
+
 			}
 		}
 
-		// todo: handle designated timestamps
-		err := sender.AtNow(ctx)
-		if err != nil {
-			return err
+		if !designatedTimestamp.IsZero() {
+			if err := sender.At(ctx, designatedTimestamp); err != nil {
+				return err
+			}
+		} else {
+			if err := sender.AtNow(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	return sender.Flush(ctx)
@@ -145,34 +190,7 @@ func walkForFields(msg *service.Message, fields map[string]any) error {
 }
 
 func (q *questdbWriter) Close(ctx context.Context) error {
-	q.senderMut.Lock()
-	defer q.senderMut.Unlock()
-	sender := q.sender
-	if sender != nil {
-		return sender.Close(ctx)
-	}
-	return nil
-}
-
-func newQuestdbWriter(conf *service.ParsedConfig, mgr *service.Resources) (r *questdbWriter, err error) {
-	table, err := conf.FieldString("table")
-	if err != nil {
-		return nil, err
-	}
-	r = &questdbWriter{
-		log: mgr.Logger(),
-		senderCtor: func(ctx context.Context) (qdb.LineSender, error) {
-			clientConfStr, err := conf.FieldString("client_conf_string")
-			if err != nil {
-				return nil, err
-			}
-			sender, err := qdb.LineSenderFromConf(ctx, clientConfStr)
-			return sender, err
-		},
-		table: table,
-	}
-
-	return r, nil
+	return q.pool.Close(ctx)
 }
 
 func init() {
@@ -185,7 +203,43 @@ func init() {
 			if mif, err = conf.FieldMaxInFlight(); err != nil {
 				return
 			}
-			out, err = newQuestdbWriter(conf, mgr)
+
+			table, err := conf.FieldString("table")
+			if err != nil {
+				return
+			}
+
+			symbols := map[string]bool{}
+			symbolsList, err := conf.FieldStringList("symbols")
+			if err != nil && strings.Contains(err.Error(), "expected field") {
+				return
+			}
+			for _, s := range symbolsList {
+				symbols[s] = true
+			}
+
+			timestampField, err := conf.FieldString("timestampField")
+			if err != nil && strings.Contains(err.Error(), "expected field") {
+				return
+			}
+
+			skipUnsupportedTypes, err := conf.FieldBool("skipUnsupportedTypes")
+			if err != nil && strings.Contains(err.Error(), "expected field") {
+				return
+			}
+
+			out = &questdbWriter{
+				log: mgr.Logger(),
+				senderCtor: func(ctx context.Context) (*qdb.LineSenderPool, error) {
+					clientConfStr, err := conf.FieldString("client_conf_string")
+					return qdb.PoolFromConf(clientConfStr), err
+				},
+				skipUnsupportedTypes: skipUnsupportedTypes,
+				symbols:              symbols,
+				table:                table,
+				timestampField:       timestampField,
+			}
+
 			return
 		})
 	if err != nil {

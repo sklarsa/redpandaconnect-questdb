@@ -4,7 +4,7 @@ go 1.22.5
 
 require (
 	github.com/ory/dockertest/v3 v3.10.0
-	github.com/questdb/go-questdb-client/v3 v3.0.8
+	github.com/questdb/go-questdb-client/v3 v3.0.9-0.20240801134420-b28d3d4c3ead
 	github.com/redpanda-data/benthos/v4 v4.33.0
 	github.com/redpanda-data/connect/public/bundle/free/v4 v4.29.0
 	github.com/stretchr/testify v1.9.0
