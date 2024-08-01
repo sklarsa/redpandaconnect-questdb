@@ -18,6 +18,8 @@ import (
 )
 
 func TestIntegrationQuestDB(t *testing.T) {
+	ctx := context.Background()
+
 	integration.CheckSkip(t)
 	t.Parallel()
 
@@ -35,16 +37,16 @@ func TestIntegrationQuestDB(t *testing.T) {
 
 	if err = pool.Retry(func() error {
 		clientConfStr := fmt.Sprintf("http::addr=localhost:%v;", resource.GetPort("9000/tcp"))
-		sender, err := qdb.LineSenderFromConf(context.TODO(), clientConfStr)
+		sender, err := qdb.LineSenderFromConf(ctx, clientConfStr)
 		if err != nil {
 			return err
 		}
-		defer sender.Close(context.Background())
-		err = sender.Table("ping").Int64Column("test", 42).AtNow(context.Background())
+		defer sender.Close(ctx)
+		err = sender.Table("ping").Int64Column("test", 42).AtNow(ctx)
 		if err != nil {
 			return err
 		}
-		return sender.Flush(context.Background())
+		return sender.Flush(ctx)
 	}); err != nil {
 		t.Fatalf("Could not connect to docker resource: %s", err)
 	}
