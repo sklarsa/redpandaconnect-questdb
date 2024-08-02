@@ -38,6 +38,14 @@ func guessTimestampUnits(timestamp int64) timestampUnit {
 	}
 }
 
+func (t timestampUnit) IsValid() bool {
+	return t == nanos ||
+		t == micros ||
+		t == millis ||
+		t == seconds ||
+		t == auto
+}
+
 func (t timestampUnit) From(value int64) time.Time {
 	switch t {
 	case nanos:
@@ -92,6 +100,7 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Description("Columns that should be the SYMBOL type (string values default to STRING)").
 				Optional(),
 		)
+	// todo: add multi-field lint rules here
 }
 
 type questdbWriter struct {
@@ -134,15 +143,16 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		return
 	}
 
-	symbols := []string{}
-	if symbols, err = conf.FieldStringList("symbols"); err != nil {
+	var symbols []string
+	symbols, err = conf.FieldStringList("symbols")
+	if err != nil {
 		return
 	}
 	for _, s := range symbols {
 		w.symbols[s] = true
 	}
 
-	timestampStringFields := []string{}
+	var timestampStringFields []string
 	if timestampStringFields, err = conf.FieldStringList("timestampStringFields"); err != nil {
 		if !strings.Contains(err.Error(), "was not found in the config") {
 			return
@@ -166,6 +176,10 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		}
 	}
 	w.designatedTimestampUnits = timestampUnit(designatedTimestampUnits)
+	if !w.designatedTimestampUnits.IsValid() {
+		err = fmt.Errorf("%v is not a valid timestamp unit", designatedTimestampUnits)
+		return
+	}
 
 	if w.skipUnsupportedTypes, err = conf.FieldBool("skipUnsupportedTypes"); err != nil {
 		if !strings.Contains(err.Error(), "was not found in the config") {
@@ -201,14 +215,13 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 	}()
 
 	for i, msg := range batch {
-		q.log.Tracef("Writing message %v", i)
-
 		var designatedTimestamp time.Time
+
+		q.log.Tracef("Writing message %v", i)
 
 		sender.Table(q.table)
 
 		fields := map[string]any{}
-
 		if err := walkForFields(msg, fields); err != nil {
 			err = fmt.Errorf("failed to walk JSON object: %v", err)
 			q.log.Errorf("QuestDB error: %w", err)
@@ -223,7 +236,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				continue
 			}
 
-			// If field is designated timestamp, process it separately
+			// If field is designated timestamp, process it based on type
 			if k == q.designatedTimestampField {
 				switch val := v.(type) {
 				case time.Time:

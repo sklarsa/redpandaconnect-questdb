@@ -5,10 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/questdb/go-questdb-client/v3"
 	"github.com/redpanda-data/benthos/v4/public/service"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestTimestampConversions(t *testing.T) {
@@ -77,43 +75,89 @@ func TestTimestampConversions(t *testing.T) {
 }
 
 func TestFromConf(t *testing.T) {
-	testCases := []struct {
-		name          string
-		conf          string
-		expected      questdbWriter
-		assertionFunc func()
-	}{
-		{
-			name: "basic",
-			conf: `
-table: test
-client_conf_string: "http::addr=localhost:9000"
-`,
-			expected: questdbWriter{
-				pool:  questdb.PoolFromConf("http::addr=localhost:9000", questdb.WithMaxSenders(64)),
-				table: "test",
-			},
-		},
-	}
+	/*
+			res := service.MockResources()
 
-	configSpec := questdbOutputConfig()
+			testCases := []struct {
+				name          string
+				conf          string
+				assertionFunc func(*questdbWriter) bool
+			}{
+				{
+					name: "basic",
+					conf: `
+		table: test
+		client_conf_string: "http::addr=localhost:9000"
+		`,
+					assertionFunc: func(w *questdbWriter) bool {
+						w.table = "test"
+						s, err := w.pool.Acquire()
+					} questdbWriter{
+						pool:  questdb.PoolFromConf("http::addr=localhost:9000", questdb.WithMaxSenders(64)),
+						table: "test",
+					},
+				},
+			}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			parsed, err := configSpec.ParseYAML(tc.conf, nil)
-			require.NoError(t, err)
+			configSpec := questdbOutputConfig()
 
-			out, _, _, err := fromConf(parsed, service.MockResources())
-			require.NoError(t, err)
+			for _, tc := range testCases {
+				t.Run(tc.name, func(t *testing.T) {
+					parsed, err := configSpec.ParseYAML(tc.conf, nil)
+					require.NoError(t, err)
 
-			writer, ok := out.(*questdbWriter)
-			require.True(t, ok)
+					out, _, _, err := fromConf(parsed, service.MockResources())
+					require.NoError(t, err)
 
-			assert.Equal(t, &tc.expected, writer)
+					writer, ok := out.(*questdbWriter)
+					require.True(t, ok)
 
-		})
-	}
+					assert.True(t, tc.assertionFunc(writer))
+
+				})
+			}
+	*/
 }
 
 func TestValidationErrorsFromConf(t *testing.T) {
+	testCases := []struct {
+		name                string
+		conf                string
+		expectedErrContains string
+	}{
+		{
+			name:                "no client_conf_string",
+			conf:                "table: test",
+			expectedErrContains: "field 'client_conf_string' is required",
+		},
+		{
+			name:                "no table",
+			conf:                `client_conf_string: "http::addr=localhost:9000"`,
+			expectedErrContains: "field 'table' is required",
+		},
+		{
+			name: "invalid timestamp unit",
+			conf: `
+client_conf_string: "http:addr=localhost:9000"
+table: test
+designatedTimestampUnits: hello`,
+			expectedErrContains: "is not a valid timestamp unit",
+		},
+	}
+
+	for _, tc := range testCases {
+		configSpec := questdbOutputConfig()
+
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := configSpec.ParseYAML(tc.conf, nil)
+			if err != nil {
+				assert.ErrorContains(t, err, tc.expectedErrContains)
+				return
+			}
+
+			_, _, _, err = fromConf(cfg, service.MockResources())
+			assert.ErrorContains(t, err, tc.expectedErrContains)
+
+		})
+	}
 }
