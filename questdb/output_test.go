@@ -7,6 +7,7 @@ import (
 
 	"github.com/redpanda-data/benthos/v4/public/service"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTimestampConversions(t *testing.T) {
@@ -75,48 +76,39 @@ func TestTimestampConversions(t *testing.T) {
 }
 
 func TestFromConf(t *testing.T) {
-	/*
-			res := service.MockResources()
 
-			testCases := []struct {
-				name          string
-				conf          string
-				assertionFunc func(*questdbWriter) bool
-			}{
-				{
-					name: "basic",
-					conf: `
-		table: test
-		client_conf_string: "http::addr=localhost:9000"
-		`,
-					assertionFunc: func(w *questdbWriter) bool {
-						w.table = "test"
-						s, err := w.pool.Acquire()
-					} questdbWriter{
-						pool:  questdb.PoolFromConf("http::addr=localhost:9000", questdb.WithMaxSenders(64)),
-						table: "test",
-					},
-				},
-			}
+	configSpec := questdbOutputConfig()
+	conf := `
+table: test
+client_conf_string: "http::addr=localhost:9000"
+skipUnsupportedTypes: true
+designatedTimestampField: myDesignatedTimestamp
+designatedTimestampUnits: nanos
+timestampStringFields:
+  - fieldA
+  - fieldB
+timestampStringFormat: 2006-01-02T15:04:05Z07:00 # rfc3339
+symbols:
+  - mySymbolA
+  - mySymbolB
+`
+	parsed, err := configSpec.ParseYAML(conf, nil)
+	require.NoError(t, err)
 
-			configSpec := questdbOutputConfig()
+	out, _, _, err := fromConf(parsed, service.MockResources())
+	require.NoError(t, err)
 
-			for _, tc := range testCases {
-				t.Run(tc.name, func(t *testing.T) {
-					parsed, err := configSpec.ParseYAML(tc.conf, nil)
-					require.NoError(t, err)
+	w, ok := out.(*questdbWriter)
+	require.True(t, ok)
 
-					out, _, _, err := fromConf(parsed, service.MockResources())
-					require.NoError(t, err)
+	assert.Equal(t, "test", w.table)
+	assert.True(t, w.skipUnsupportedTypes)
+	assert.Equal(t, "myDesignatedTimestamp", w.designatedTimestampField)
+	assert.Equal(t, nanos, w.designatedTimestampUnits)
+	assert.Equal(t, map[string]bool{"fieldA": true, "fieldB": true}, w.timestampStringFields)
+	assert.Equal(t, time.RFC3339, w.timestampStringFormat)
+	assert.Equal(t, map[string]bool{"mySymbolA": true, "mySymbolB": true}, w.symbols)
 
-					writer, ok := out.(*questdbWriter)
-					require.True(t, ok)
-
-					assert.True(t, tc.assertionFunc(writer))
-
-				})
-			}
-	*/
 }
 
 func TestValidationErrorsFromConf(t *testing.T) {
