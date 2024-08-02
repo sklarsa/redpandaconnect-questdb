@@ -137,7 +137,10 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 	if err != nil {
 		return
 	}
-	w.pool = qdb.PoolFromConf(clientConfStr, qdb.WithMaxSenders(mif))
+	w.pool, err = qdb.PoolFromConf(clientConfStr, qdb.WithMaxSenders(mif))
+	if err != nil {
+		return
+	}
 
 	if w.table, err = conf.FieldString("table"); err != nil {
 		return

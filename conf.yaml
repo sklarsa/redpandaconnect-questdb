@@ -16,27 +16,30 @@ http:
     algorithm: sha256
     salt: ""
 input:
-  stdin: {}
+  http_server: {}
 buffer:
   none: {}
 pipeline:
   threads: -1
   processors: []
 output:
-  broker:
-    pattern: fan_out
-    outputs:
-      - questdb:
-          "client_conf_string": "http::addr=localhost:9000"
-          "table": "hello"
-      - stdout: {}
+  questdb:
+    client_conf_string: http::addr=localhost:9000
+    table: hello2
+#  broker:
+#    pattern: fan_out
+#    outputs:
+#      - questdb:
+#          "client_conf_string": "http::addr=localhost:9000"
+#          "table": "hello"
+#      - stdout: {}
 input_resources: []
 processor_resources: []
 output_resources: []
 cache_resources: []
 rate_limit_resources: []
 logger:
-  level: INFO
+  level: DEBUG
   format: logfmt
   add_timestamp: false
   level_name: level
