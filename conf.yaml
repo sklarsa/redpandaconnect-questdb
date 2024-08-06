@@ -26,6 +26,7 @@ output:
   questdb:
     client_conf_string: http::addr=localhost:9000
     table: hello2
+    max_in_flight: 256
 #  broker:
 #    pattern: fan_out
 #    outputs:

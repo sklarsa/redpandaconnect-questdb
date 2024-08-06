@@ -3,25 +3,44 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
 	"math"
 	rand "math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	_ "net/http/pprof"
 )
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6061", nil))
+	}()
+
+	var (
+		genThreads  = 1
+		sendThreads = 64
+	)
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
+	http.DefaultTransport.(*http.Transport).MaxIdleConns = 100
+
 	g := &generator{
 		bufSize: 10000,
 		fields: map[string]field{
-			"test":       int64Field{},
-			"testString": stringField{length: 24},
+			"test":        int64Field{},
+			"testString":  stringField{length: 24},
+			"testFloat32": float32Field{},
+			"testFloat64": float64Field{},
+			"testint64":   int64Field{},
 		},
 		once: &sync.Once{},
 
-		genThreads:  1,
-		sendThreads: 64,
+		genThreads:  genThreads,
+		sendThreads: sendThreads,
 
 		benthosEndpoint: "http://localhost:4195/post",
 	}
@@ -51,6 +70,7 @@ type generator struct {
 
 func (g *generator) start() {
 	g.once.Do(func() {
+
 		g.buf = make(chan string, g.bufSize)
 		for range g.genThreads {
 			go func() {
@@ -83,14 +103,17 @@ func (g *generator) start() {
 					)
 
 					if err != nil {
-						println(err.Error())
+						fmt.Printf("error: %v\n", err)
 						time.Sleep(time.Millisecond * 100)
 						continue
 					}
 
 					if resp.StatusCode > 399 {
-						println(resp.Status)
+						fmt.Printf("%d: %v\n", resp.StatusCode, resp.Status)
 					}
+
+					io.Copy(ioutil.Discard, resp.Body)
+					resp.Body.Close()
 
 				}
 			}()
