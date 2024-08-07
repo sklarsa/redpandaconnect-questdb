@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgconn"
 	qdb "github.com/questdb/go-questdb-client/v3"
 
 	"github.com/ory/dockertest/v3"
@@ -60,54 +61,24 @@ output:
     table: $ID
 `
 	queryGetFn := func(ctx context.Context, testID, messageID string) (string, []string, error) {
-		req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%v/exec", resource.GetPort("9000/tcp")), nil)
+		pgConn, err := pgconn.Connect(ctx, fmt.Sprintf("postgresql://admin:quest@localhost:%v", resource.GetPort("8812/tcp")))
+		require.NoError(t, err)
+		defer pgConn.Close(ctx)
 
-		q := req.URL.Query()
-		q.Add("query", fmt.Sprintf("SELECT * from '%v' where id = %v", testID, messageID))
-		req.URL.RawQuery = q.Encode()
+		result := pgConn.ExecParams(ctx, fmt.Sprintf("SELECT content, id FROM '%v' WHERE id=%v", testID, messageID), nil, nil, nil, nil)
 
-		if err != nil {
-			return "", nil, err
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return "", nil, err
-		}
-		defer resp.Body.Close()
-
-		var data map[string]interface{}
-		err = json.NewDecoder(resp.Body).Decode(&data)
-		if err != nil {
-			return "", nil, err
-		}
-		count, ok := data["count"].(float64)
-		if !ok {
-			return "", nil, fmt.Errorf("bad count type, expected float64, got %T", data["count"])
+		result.NextRow()
+		id, err := strconv.Atoi(string(result.Values()[1]))
+		assert.NoError(t, err)
+		data := map[string]any{
+			"content": string(result.Values()[0]),
+			"id":      id,
 		}
 
-		if int(count) != 1 {
-			return "", nil, fmt.Errorf("bad row count, expected 1, got %v", data["count"])
-		}
+		assert.False(t, result.NextRow())
 
-		columns := data["columns"]
-		row := data["dataset"].([]interface{})[0].([]interface{})
-		if len(columns.([]interface{})) != len(row) {
-			return "", nil, fmt.Errorf("column count mismatch, expected %v, got %v", len(columns.([]interface{})), len(row))
-		}
-
-		output := map[string]interface{}{}
-		for i, col := range columns.([]interface{}) {
-			col0 := col.(map[string]interface{})
-			colName := col0["name"].(string)
-			// Skip timestamp column, it's synthetic, added by QuestDB
-			if colName != "timestamp" {
-				output[colName] = row[i]
-			}
-		}
-		outputBytes, err := json.Marshal(output)
-		if err != nil {
-			return "", nil, err
-		}
+		outputBytes, err := json.Marshal(data)
+		require.NoError(t, err)
 		return string(outputBytes), nil, nil
 	}
 

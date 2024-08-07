@@ -78,9 +78,6 @@ func questdbOutputConfig() *service.ConfigSpec {
 			service.NewStringField("table").
 				Description("Destination table").
 				Example("trades"),
-			service.NewBoolField("skipUnsupportedTypes").
-				Description("Skips unsupported types (logging them at the warning level)").
-				Default(false),
 			service.NewStringField("designatedTimestampField").
 				Description("Name of the designated timestamp field").
 				Optional(),
@@ -108,7 +105,6 @@ type questdbWriter struct {
 
 	pool *qdb.LineSenderPool
 
-	skipUnsupportedTypes     bool
 	symbols                  map[string]bool
 	table                    string
 	designatedTimestampField string
@@ -184,12 +180,6 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		return
 	}
 
-	if w.skipUnsupportedTypes, err = conf.FieldBool("skipUnsupportedTypes"); err != nil {
-		if !strings.Contains(err.Error(), "was not found in the config") {
-			return
-		}
-	}
-
 	if w.timestampStringFormat, err = conf.FieldString("timestampStringFormat"); err != nil {
 		if !strings.Contains(err.Error(), "was not found in the config") {
 			return
@@ -206,14 +196,14 @@ func (q *questdbWriter) Connect(ctx context.Context) error {
 func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	sender, err := q.pool.Acquire(ctx)
 	if err != nil {
-		q.log.Errorf("QuestDB error: %v\n", err)
+		q.log.Errorf("QuestDB error: %v", err)
 		return err
 	}
 
 	defer func() {
 		err := q.pool.Release(ctx, sender)
 		if err != nil {
-			q.log.Errorf("QuestDB error: %v\n", err)
+			q.log.Errorf("QuestDB error: %v", err)
 		}
 	}()
 
@@ -226,13 +216,11 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 		fields := map[string]any{}
 		if err := walkForFields(msg, fields); err != nil {
-			err = fmt.Errorf("failed to walk JSON object: %v", err)
-			q.log.Errorf("QuestDB error: %w", err)
-			return err
+			q.log.Errorf("QuestDB error: failed to walk JSON object: %v", err)
+			continue
 		}
 
 		for k, v := range fields {
-
 			// Check to see if the field is a symbol
 			if _, found := q.symbols[k]; found {
 				sender.Symbol(k, fmt.Sprintf("%v", v))
@@ -246,19 +234,26 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 					designatedTimestamp = val
 				case string:
 					t, err := time.Parse(q.timestampStringFormat, val)
-					if err != nil {
-						return fmt.Errorf("QuestDB error: could not parse designated timestamp field %w", err)
+					if err == nil {
+						designatedTimestamp = t
+					} else {
+						q.log.Errorf("QuestDB error: could not parse designated timestamp field %v", err)
 					}
 					designatedTimestamp = t
 				case int:
-					designatedTimestamp = q.designatedTimestampUnits.From(int64(val))
 				case int32:
-					designatedTimestamp = q.designatedTimestampUnits.From(int64(val))
 				case int64:
-					designatedTimestamp = q.designatedTimestampUnits.From(val)
+					designatedTimestamp = q.designatedTimestampUnits.From(int64(val))
+				case json.Number:
+					intVal, err := val.Int64()
+					if err == nil {
+						designatedTimestamp = q.designatedTimestampUnits.From(intVal)
+					} else {
+						q.log.Errorf("QuestDB error: numerical timestamps must be int64: %v", err)
+					}
 				default:
-					// todo: exit here or no?
-					q.log.Errorf("Unsupported type %T for designated timestamp field %v", v, k)
+					q.log.Errorf("QuestDB error: unsupported type %T for designated timestamp field %v", v, k)
+					continue
 				}
 
 				continue
@@ -266,47 +261,47 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 			switch val := v.(type) {
 			case string:
-				if _, found := q.timestampStringFields[k]; found {
+				_, isTimestampField := q.timestampStringFields[k]
+				if isTimestampField {
 					t, err := time.Parse(q.timestampStringFormat, val)
-					if err != nil {
-						return fmt.Errorf("QuestDB error: could not parse timestamp %v in field %v: %w", val, k, err)
+					if err == nil {
+						sender.TimestampColumn(k, t)
+					} else {
+						q.log.Errorf("QuestDB error: could not parse timestamp %v in field %v: %v", val, k, err)
 					}
-					sender.TimestampColumn(k, t)
-					continue
+				} else {
+					sender.StringColumn(k, val)
 				}
-
-				sender.StringColumn(k, val)
 			case int:
 			case int32:
 			case int64:
 				sender.Int64Column(k, val)
 			case float32:
-				sender.Float64Column(k, float64(val))
 			case float64:
-				sender.Float64Column(k, val)
+				sender.Float64Column(k, float64(val))
 			case bool:
 				sender.BoolColumn(k, val)
 			case json.Number:
-				f, err := val.Float64()
-				if err != nil {
-					return err
+				intVal, err := val.Int64()
+				if err == nil {
+					sender.Int64Column(k, intVal)
+				} else {
+					floatVal, err := val.Float64()
+					if err == nil {
+						sender.Float64Column(k, floatVal)
+					} else {
+						q.log.Errorf("QuestDB error: could not parse %v into a number: %v", val, err)
+					}
 				}
-				sender.Float64Column(k, f)
 			case time.Time:
 				sender.TimestampColumn(k, val)
-			case map[string]any: // Assuming nested JSON object handling if needed
-				// todo: flatten nested JSON object
-				q.log.Errorf("Unsupported type %T for field %v", v, k)
+			case map[string]any: // todo: flatten nested JSON object
 			default:
-				msg := fmt.Sprintf("Unsupported type %T for field %v", v, k)
-				if q.skipUnsupportedTypes {
-					q.log.Warn(msg)
-				} else {
-					q.log.Errorf(msg)
-				}
+				q.log.Errorf("Unsupported type %T for field %v", v, k)
 			}
 		}
 
+		// Send message after processing all fields
 		if !designatedTimestamp.IsZero() {
 			if err := sender.At(ctx, designatedTimestamp); err != nil {
 				return err

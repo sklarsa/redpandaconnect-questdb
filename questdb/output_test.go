@@ -81,7 +81,6 @@ func TestFromConf(t *testing.T) {
 	conf := `
 table: test
 client_conf_string: "http::addr=localhost:9000"
-skipUnsupportedTypes: true
 designatedTimestampField: myDesignatedTimestamp
 designatedTimestampUnits: nanos
 timestampStringFields:
@@ -102,7 +101,6 @@ symbols:
 	require.True(t, ok)
 
 	assert.Equal(t, "test", w.table)
-	assert.True(t, w.skipUnsupportedTypes)
 	assert.Equal(t, "myDesignatedTimestamp", w.designatedTimestampField)
 	assert.Equal(t, nanos, w.designatedTimestampUnits)
 	assert.Equal(t, map[string]bool{"fieldA": true, "fieldB": true}, w.timestampStringFields)

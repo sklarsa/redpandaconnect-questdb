@@ -3,6 +3,7 @@ module github.com/sklarsa/redpandaconnect-questdb
 go 1.22.5
 
 require (
+	github.com/jackc/pgconn v1.14.3
 	github.com/ory/dockertest/v3 v3.10.0
 	github.com/questdb/go-questdb-client/v3 v3.1.0
 	github.com/redpanda-data/benthos/v4 v4.33.0
@@ -190,7 +191,6 @@ require (
 	github.com/itchyny/gojq v0.12.16 // indirect
 	github.com/itchyny/timefmt-go v0.1.6 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
-	github.com/jackc/pgconn v1.14.3 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgproto3/v2 v2.3.3 // indirect
