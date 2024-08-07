@@ -81,7 +81,7 @@ func questdbOutputConfig() *service.ConfigSpec {
 			service.NewStringField("designatedTimestampField").
 				Description("Name of the designated timestamp field").
 				Optional(),
-			service.NewStringField("designatedTimestampUnits").
+			service.NewStringField("timestampUnits").
 				Description("Designated timestamp field units").
 				Default("auto").
 				LintRule(`root = if ["nanos","micros","millis","seconds","auto"].contains(this) != true { [ "valid options are \"nanos\", \"micros\", \"millis\", \"seconds\", \"auto\"" ] }`).
@@ -108,7 +108,7 @@ type questdbWriter struct {
 	symbols                  map[string]bool
 	table                    string
 	designatedTimestampField string
-	designatedTimestampUnits timestampUnit
+	timestampUnits           timestampUnit
 	timestampStringFormat    string
 	timestampStringFields    map[string]bool
 }
@@ -168,15 +168,16 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		}
 	}
 
-	var designatedTimestampUnits string
-	if designatedTimestampUnits, err = conf.FieldString("designatedTimestampUnits"); err != nil {
+	var timestampUnits string
+	if timestampUnits, err = conf.FieldString("timestampUnits"); err != nil {
 		if !strings.Contains(err.Error(), "was not found in the config") {
 			return
 		}
 	}
-	w.designatedTimestampUnits = timestampUnit(designatedTimestampUnits)
-	if !w.designatedTimestampUnits.IsValid() {
-		err = fmt.Errorf("%v is not a valid timestamp unit", designatedTimestampUnits)
+	// perform validation on timestamp units here in case the user doesn't lint the config
+	w.timestampUnits = timestampUnit(timestampUnits)
+	if !w.timestampUnits.IsValid() {
+		err = fmt.Errorf("%v is not a valid timestamp unit", timestampUnits)
 		return
 	}
 
@@ -190,7 +191,31 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 }
 
 func (q *questdbWriter) Connect(ctx context.Context) error {
+	// No connections are required to initialize a LineSenderPool,
+	// so nothing to do here. Each LineSender has its own http client
+	// that will use the network only when flushing messages to the server.
 	return nil
+}
+
+func (q *questdbWriter) parseTimestamp(v any) (time.Time, error) {
+	switch val := v.(type) {
+	case string:
+		t, err := time.Parse(q.timestampStringFormat, val)
+		if err != nil {
+			q.log.Errorf("QuestDB error: could not parse timestamp field %v", err)
+		}
+		return t, err
+	case json.Number:
+		intVal, err := val.Int64()
+		if err != nil {
+			q.log.Errorf("QuestDB error: numerical timestamps must be int64: %v", err)
+		}
+		return q.timestampUnits.From(intVal), err
+	default:
+		err := fmt.Errorf("QuestDB error: unsupported type %T for designated timestamp: %v", v, v)
+		q.log.Error(err.Error())
+		return time.Time{}, err
+	}
 }
 
 func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
@@ -221,67 +246,33 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		}
 
 		for k, v := range fields {
-			// Check to see if the field is a symbol
-			if _, found := q.symbols[k]; found {
+			// First handle the special cases: symbols, timestamps, and designated timestamp
+			if _, isSymbol := q.symbols[k]; isSymbol {
 				sender.Symbol(k, fmt.Sprintf("%v", v))
 				continue
 			}
 
-			// If field is designated timestamp, process it based on type
 			if k == q.designatedTimestampField {
-				switch val := v.(type) {
-				case time.Time:
-					designatedTimestamp = val
-				case string:
-					t, err := time.Parse(q.timestampStringFormat, val)
-					if err == nil {
-						designatedTimestamp = t
-					} else {
-						q.log.Errorf("QuestDB error: could not parse designated timestamp field %v", err)
-					}
-					designatedTimestamp = t
-				case int:
-				case int32:
-				case int64:
-					designatedTimestamp = q.designatedTimestampUnits.From(int64(val))
-				case json.Number:
-					intVal, err := val.Int64()
-					if err == nil {
-						designatedTimestamp = q.designatedTimestampUnits.From(intVal)
-					} else {
-						q.log.Errorf("QuestDB error: numerical timestamps must be int64: %v", err)
-					}
-				default:
-					q.log.Errorf("QuestDB error: unsupported type %T for designated timestamp field %v", v, k)
-					continue
-				}
-
+				designatedTimestamp, _ = q.parseTimestamp(v)
 				continue
 			}
 
+			if _, isTimestampField := q.timestampStringFields[k]; isTimestampField {
+				timestamp, err := q.parseTimestamp(v)
+				if err == nil {
+					sender.TimestampColumn(k, timestamp)
+				}
+				continue
+			}
+
+			// For all other fields, process values by JSON types since we are working with structured messages
 			switch val := v.(type) {
 			case string:
-				_, isTimestampField := q.timestampStringFields[k]
-				if isTimestampField {
-					t, err := time.Parse(q.timestampStringFormat, val)
-					if err == nil {
-						sender.TimestampColumn(k, t)
-					} else {
-						q.log.Errorf("QuestDB error: could not parse timestamp %v in field %v: %v", val, k, err)
-					}
-				} else {
-					sender.StringColumn(k, val)
-				}
-			case int:
-			case int32:
-			case int64:
-				sender.Int64Column(k, val)
-			case float32:
-			case float64:
-				sender.Float64Column(k, float64(val))
+				sender.StringColumn(k, val)
 			case bool:
 				sender.BoolColumn(k, val)
 			case json.Number:
+				// For json numbers, first attempt to parse as int, then fallback to float
 				intVal, err := val.Int64()
 				if err == nil {
 					sender.Int64Column(k, intVal)
@@ -293,15 +284,15 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 						q.log.Errorf("QuestDB error: could not parse %v into a number: %v", val, err)
 					}
 				}
-			case time.Time:
-				sender.TimestampColumn(k, val)
-			case map[string]any: // todo: flatten nested JSON object
+			case float64:
+				// float64 is only needed if BENTHOS_USE_NUMBER=false
+				sender.Float64Column(k, float64(val))
 			default:
 				q.log.Errorf("Unsupported type %T for field %v", v, k)
 			}
 		}
 
-		// Send message after processing all fields
+		// Complete the ILP message after processing all fields
 		if !designatedTimestamp.IsZero() {
 			if err := sender.At(ctx, designatedTimestamp); err != nil {
 				return err

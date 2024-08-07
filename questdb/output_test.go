@@ -82,7 +82,7 @@ func TestFromConf(t *testing.T) {
 table: test
 client_conf_string: "http::addr=localhost:9000"
 designatedTimestampField: myDesignatedTimestamp
-designatedTimestampUnits: nanos
+timestampUnits: nanos
 timestampStringFields:
   - fieldA
   - fieldB
@@ -102,7 +102,7 @@ symbols:
 
 	assert.Equal(t, "test", w.table)
 	assert.Equal(t, "myDesignatedTimestamp", w.designatedTimestampField)
-	assert.Equal(t, nanos, w.designatedTimestampUnits)
+	assert.Equal(t, nanos, w.timestampUnits)
 	assert.Equal(t, map[string]bool{"fieldA": true, "fieldB": true}, w.timestampStringFields)
 	assert.Equal(t, time.RFC3339, w.timestampStringFormat)
 	assert.Equal(t, map[string]bool{"mySymbolA": true, "mySymbolB": true}, w.symbols)
@@ -130,7 +130,7 @@ func TestValidationErrorsFromConf(t *testing.T) {
 			conf: `
 client_conf_string: "http:addr=localhost:9000"
 table: test
-designatedTimestampUnits: hello`,
+timestampUnits: hello`,
 			expectedErrContains: "is not a valid timestamp unit",
 		},
 	}
