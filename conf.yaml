@@ -16,7 +16,8 @@ http:
     algorithm: sha256
     salt: ""
 input:
-  http_server: {}
+  #http_server: {}
+  stdin: {}
 buffer:
   none: {}
 pipeline:
@@ -24,9 +25,12 @@ pipeline:
   processors: []
 output:
   questdb:
-    client_conf_string: http::addr=localhost:9000
-    table: hello2
+    client_conf_string: localhost:9000
+    table: hello3
     max_in_flight: 256
+    timestampFields:
+      - t
+    designatedTimestampField: "d"
 #  broker:
 #    pattern: fan_out
 #    outputs:

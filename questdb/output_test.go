@@ -83,7 +83,7 @@ table: test
 client_conf_string: "http::addr=localhost:9000"
 designatedTimestampField: myDesignatedTimestamp
 timestampUnits: nanos
-timestampStringFields:
+timestampFields:
   - fieldA
   - fieldB
 timestampStringFormat: 2006-01-02T15:04:05Z07:00 # rfc3339
@@ -103,7 +103,7 @@ symbols:
 	assert.Equal(t, "test", w.table)
 	assert.Equal(t, "myDesignatedTimestamp", w.designatedTimestampField)
 	assert.Equal(t, nanos, w.timestampUnits)
-	assert.Equal(t, map[string]bool{"fieldA": true, "fieldB": true}, w.timestampStringFields)
+	assert.Equal(t, map[string]bool{"fieldA": true, "fieldB": true}, w.timestampFields)
 	assert.Equal(t, time.RFC3339, w.timestampStringFormat)
 	assert.Equal(t, map[string]bool{"mySymbolA": true, "mySymbolB": true}, w.symbols)
 

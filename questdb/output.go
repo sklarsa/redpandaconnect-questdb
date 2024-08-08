@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	qdb "github.com/questdb/go-questdb-client/v3"
@@ -71,10 +72,27 @@ func questdbOutputConfig() *service.ConfigSpec {
 		Fields(
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(loFieldBatching),
-			service.NewStringField("client_conf_string").
-				Description("QuestDB client configuration string").
-				Secret().
-				Example("http::addr=localhost:9000;"),
+			service.NewStringField("address").
+				Description("Address of the QuestDB server's HTTP port (excluding protocol)").
+				Example("localhost:9000"),
+			service.NewStringField("username").
+				Description("Username for HTTP basic auth").
+				Optional().
+				Secret(),
+			service.NewStringField("password").
+				Description("Password for HTTP basic auth").
+				Optional().
+				Secret(),
+			service.NewBoolField("tls_enabled").
+				Description("Use TLS to secure the connection to the server").
+				Optional(),
+			service.NewStringField("tls_verify").
+				Description("Whether to verify the server's certificate. This should only be used for testing as a last resort and never used in production as it makes the connection vulnerable to man-in-the-middle attacks. Options are 'on' or 'unsafe_off'.").
+				Optional().
+				LintRule(`root = if ["on","unsafe_off"].contains(this != true { ["valid options are \"on\" or \"unsafe_off\"" ] }`),
+			service.NewStringField("token").
+				Description("Bearer token for HTTP auth (used in lieu of basic auth)").
+				Secret(),
 			service.NewStringField("table").
 				Description("Destination table").
 				Example("trades"),
@@ -86,7 +104,7 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Default("auto").
 				LintRule(`root = if ["nanos","micros","millis","seconds","auto"].contains(this) != true { [ "valid options are \"nanos\", \"micros\", \"millis\", \"seconds\", \"auto\"" ] }`).
 				Optional(),
-			service.NewStringListField("timestampStringFields").
+			service.NewStringListField("timestampFields").
 				Description("String fields with textual timestamps").
 				Optional(),
 			service.NewStringField("timestampStringFormat").
@@ -97,7 +115,6 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Description("Columns that should be the SYMBOL type (string values default to STRING)").
 				Optional(),
 		)
-	// todo: add multi-field lint rules here
 }
 
 type questdbWriter struct {
@@ -110,14 +127,48 @@ type questdbWriter struct {
 	designatedTimestampField string
 	timestampUnits           timestampUnit
 	timestampStringFormat    string
-	timestampStringFields    map[string]bool
+	timestampFields          map[string]bool
 }
 
 func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPol service.BatchPolicy, mif int, err error) {
+	var (
+		confString = &strings.Builder{}
+	)
+
+	confString.WriteString("http")
+	if tls, _ := conf.FieldBool("tls_enabled"); tls {
+		confString.WriteRune('s')
+	}
+
+	confString.WriteString("::addr")
+
+	var addr string
+	if addr, err = conf.FieldString("address"); err != nil {
+		return
+	}
+	confString.WriteString(addr)
+
+	if token, _ := conf.FieldString("token"); token != "" {
+		confString.WriteString(",token=")
+		confString.WriteString(token)
+	} else {
+		username, _ := conf.FieldString("username")
+		password, _ := conf.FieldString("password")
+		if username != "" && password != "" {
+			confString.WriteString(",username=")
+			confString.WriteString(username)
+			confString.WriteString(",password=")
+			confString.WriteString(password)
+
+		}
+	}
+
+	confString.WriteString(",auto_flush=off")
+
 	w := &questdbWriter{
-		log:                   mgr.Logger(),
-		symbols:               map[string]bool{},
-		timestampStringFields: map[string]bool{},
+		log:             mgr.Logger(),
+		symbols:         map[string]bool{},
+		timestampFields: map[string]bool{},
 	}
 	out = w
 
@@ -129,11 +180,7 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		return
 	}
 
-	clientConfStr, err := conf.FieldString("client_conf_string")
-	if err != nil {
-		return
-	}
-	w.pool, err = qdb.PoolFromConf(clientConfStr, qdb.WithMaxSenders(mif))
+	w.pool, err = qdb.PoolFromConf(confString.String(), qdb.WithMaxSenders(mif))
 	if err != nil {
 		return
 	}
@@ -151,15 +198,15 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		w.symbols[s] = true
 	}
 
-	var timestampStringFields []string
-	if timestampStringFields, err = conf.FieldStringList("timestampStringFields"); err != nil {
+	var timestampFields []string
+	if timestampFields, err = conf.FieldStringList("timestampFields"); err != nil {
 		if !strings.Contains(err.Error(), "was not found in the config") {
 			return
 		}
 
 	}
-	for _, f := range timestampStringFields {
-		w.timestampStringFields[f] = true
+	for _, f := range timestampFields {
+		w.timestampFields[f] = true
 	}
 
 	if w.designatedTimestampField, err = conf.FieldString("designatedTimestampField"); err != nil {
@@ -219,66 +266,93 @@ func (q *questdbWriter) parseTimestamp(v any) (time.Time, error) {
 }
 
 func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
-	sender, err := q.pool.Acquire(ctx)
+	var (
+		err    error
+		sender qdb.LineSender
+	)
+
+	sender, err = q.pool.Acquire(ctx)
 	if err != nil {
 		q.log.Errorf("QuestDB error: %v", err)
 		return err
 	}
 
+	panic("figure out which errors to return for the desired behavior of retrying the entire batch on a flush fail, or drop malformed messages? idk..")
+
 	defer func() {
-		err := q.pool.Release(ctx, sender)
-		if err != nil {
-			q.log.Errorf("QuestDB error: %v", err)
+		// This will flush the sender, no need to call sender.Flush at the end of the method
+		tmpErr := q.pool.Release(ctx, sender)
+		if tmpErr != nil {
+			q.log.Errorf("QuestDB error: %v", tmpErr)
 		}
 	}()
 
-	for i, msg := range batch {
-		var designatedTimestamp time.Time
+	return batch.WalkWithBatchedErrors(func(i int, m *service.Message) error {
+		var (
+			hasTable    bool
+			ensureTable = sync.OnceFunc(func() {
+				sender.Table(q.table)
+				hasTable = true
+			})
+		)
 
 		q.log.Tracef("Writing message %v", i)
 
-		sender.Table(q.table)
-
-		fields := map[string]any{}
-		if err := walkForFields(msg, fields); err != nil {
-			q.log.Errorf("QuestDB error: failed to walk JSON object: %v", err)
-			continue
+		jVal, err := m.AsStructuredMut()
+		if err != nil {
+			return fmt.Errorf("unable to parse json: %v", err)
+		}
+		jObj, ok := jVal.(map[string]any)
+		if !ok {
+			return fmt.Errorf("expected JSON object, found '%T'", jVal)
 		}
 
-		for k, v := range fields {
-			// First handle the special cases: symbols, timestamps, and designated timestamp
-			if _, isSymbol := q.symbols[k]; isSymbol {
-				sender.Symbol(k, fmt.Sprintf("%v", v))
+		// First handle symbols
+		for s := range q.symbols {
+			val, found := jObj[s]
+			if found {
+				ensureTable()
+				sender.Symbol(s, fmt.Sprintf("%v", val))
+				delete(jObj, s)
+			}
+		}
+
+		// Then handle columns
+		for k, v := range jObj {
+
+			// Skip designated timestamp field
+			if q.designatedTimestampField != "" && q.designatedTimestampField == k {
 				continue
 			}
 
-			if k == q.designatedTimestampField {
-				designatedTimestamp, _ = q.parseTimestamp(v)
-				continue
-			}
-
-			if _, isTimestampField := q.timestampStringFields[k]; isTimestampField {
+			// Then check if the field is a timestamp
+			if _, isTimestampField := q.timestampFields[k]; isTimestampField {
 				timestamp, err := q.parseTimestamp(v)
 				if err == nil {
+					ensureTable()
 					sender.TimestampColumn(k, timestamp)
 				}
 				continue
 			}
 
-			// For all other fields, process values by JSON types since we are working with structured messages
+			// For all non-timestamp fields, process values by JSON types since we are working with structured messages
 			switch val := v.(type) {
 			case string:
+				ensureTable()
 				sender.StringColumn(k, val)
 			case bool:
+				ensureTable()
 				sender.BoolColumn(k, val)
 			case json.Number:
 				// For json numbers, first attempt to parse as int, then fallback to float
 				intVal, err := val.Int64()
 				if err == nil {
+					ensureTable()
 					sender.Int64Column(k, intVal)
 				} else {
 					floatVal, err := val.Float64()
 					if err == nil {
+						ensureTable()
 						sender.Float64Column(k, floatVal)
 					} else {
 						q.log.Errorf("QuestDB error: could not parse %v into a number: %v", val, err)
@@ -286,39 +360,39 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				}
 			case float64:
 				// float64 is only needed if BENTHOS_USE_NUMBER=false
+				ensureTable()
 				sender.Float64Column(k, float64(val))
 			default:
-				q.log.Errorf("Unsupported type %T for field %v", v, k)
+				q.log.Errorf("unsupported type %T for field %v", v, k)
 			}
 		}
 
-		// Complete the ILP message after processing all fields
+		// Finally handle designated timestamp
+		var designatedTimestamp time.Time
+		if q.designatedTimestampField != "" {
+			val, found := jObj[q.designatedTimestampField]
+			if found {
+				designatedTimestamp, err = q.parseTimestamp(val)
+				if err != nil {
+					q.log.Errorf("unable to parse designated timestamp: %v", val)
+				}
+			}
+		}
+
+		if !hasTable {
+			q.log.Warn("empty message, skipping send to QuestDB")
+			return nil
+		}
+
 		if !designatedTimestamp.IsZero() {
-			if err := sender.At(ctx, designatedTimestamp); err != nil {
-				return err
-			}
+			err = sender.At(ctx, designatedTimestamp)
 		} else {
-			if err := sender.AtNow(ctx); err != nil {
-				return err
-			}
+			err = sender.AtNow(ctx)
 		}
-	}
-	return sender.Flush(ctx)
-}
 
-func walkForFields(msg *service.Message, fields map[string]any) error {
-	jVal, err := msg.AsStructured()
-	if err != nil {
 		return err
-	}
-	jObj, ok := jVal.(map[string]any)
-	if !ok {
-		return fmt.Errorf("expected JSON object, found '%T'", jVal)
-	}
-	for k, v := range jObj {
-		fields[k] = v
-	}
-	return nil
+	})
+
 }
 
 func (q *questdbWriter) Close(ctx context.Context) error {
