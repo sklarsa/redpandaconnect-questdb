@@ -25,19 +25,12 @@ pipeline:
   processors: []
 output:
   questdb:
-    client_conf_string: localhost:9000
+    address: localhost:9000
     table: hello3
     max_in_flight: 256
     timestampFields:
       - t
     designatedTimestampField: "d"
-#  broker:
-#    pattern: fan_out
-#    outputs:
-#      - questdb:
-#          "client_conf_string": "http::addr=localhost:9000"
-#          "table": "hello"
-#      - stdout: {}
 input_resources: []
 processor_resources: []
 output_resources: []

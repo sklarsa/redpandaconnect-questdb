@@ -37,7 +37,7 @@ func TestIntegrationQuestDB(t *testing.T) {
 	})
 
 	if err = pool.Retry(func() error {
-		clientConfStr := fmt.Sprintf("http::addr=localhost:%v;", resource.GetPort("9000/tcp"))
+		clientConfStr := fmt.Sprintf("http::addr=localhost:%v", resource.GetPort("9000/tcp"))
 		sender, err := qdb.LineSenderFromConf(ctx, clientConfStr)
 		if err != nil {
 			return err
@@ -57,7 +57,7 @@ func TestIntegrationQuestDB(t *testing.T) {
 	template := `
 output:
   questdb:
-    client_conf_string: "http::addr=localhost:$PORT;"
+    address: "localhost:$PORT"
     table: $ID
 `
 	queryGetFn := func(ctx context.Context, testID, messageID string) (string, []string, error) {

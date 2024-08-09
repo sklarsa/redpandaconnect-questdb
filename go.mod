@@ -5,7 +5,7 @@ go 1.22.5
 require (
 	github.com/jackc/pgconn v1.14.3
 	github.com/ory/dockertest/v3 v3.10.0
-	github.com/questdb/go-questdb-client/v3 v3.1.0
+	github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240809163014-61f3491fe28a
 	github.com/redpanda-data/benthos/v4 v4.33.0
 	github.com/redpanda-data/connect/public/bundle/free/v4 v4.29.0
 	github.com/stretchr/testify v1.9.0

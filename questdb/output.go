@@ -92,6 +92,7 @@ func questdbOutputConfig() *service.ConfigSpec {
 				LintRule(`root = if ["on","unsafe_off"].contains(this != true { ["valid options are \"on\" or \"unsafe_off\"" ] }`),
 			service.NewStringField("token").
 				Description("Bearer token for HTTP auth (used in lieu of basic auth)").
+				Optional().
 				Secret(),
 			service.NewStringField("table").
 				Description("Destination table").
@@ -131,39 +132,32 @@ type questdbWriter struct {
 }
 
 func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPol service.BatchPolicy, mif int, err error) {
-	var (
-		confString = &strings.Builder{}
-	)
 
-	confString.WriteString("http")
-	if tls, _ := conf.FieldBool("tls_enabled"); tls {
-		confString.WriteRune('s')
+	opts := []qdb.LineSenderOption{
+		qdb.WithHttp(),
+		qdb.WithAutoFlushDisabled(),
 	}
 
-	confString.WriteString("::addr")
+	if tls, _ := conf.FieldBool("tls_enabled"); tls {
+		opts = append(opts, qdb.WithTls())
+	}
 
 	var addr string
 	if addr, err = conf.FieldString("address"); err != nil {
 		return
 	}
-	confString.WriteString(addr)
+	opts = append(opts, qdb.WithAddress(addr))
 
 	if token, _ := conf.FieldString("token"); token != "" {
-		confString.WriteString(",token=")
-		confString.WriteString(token)
+		opts = append(opts, qdb.WithBearerToken(token))
 	} else {
 		username, _ := conf.FieldString("username")
 		password, _ := conf.FieldString("password")
 		if username != "" && password != "" {
-			confString.WriteString(",username=")
-			confString.WriteString(username)
-			confString.WriteString(",password=")
-			confString.WriteString(password)
+			opts = append(opts, qdb.WithBasicAuth(username, password))
 
 		}
 	}
-
-	confString.WriteString(",auto_flush=off")
 
 	w := &questdbWriter{
 		log:             mgr.Logger(),
@@ -180,10 +174,12 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		return
 	}
 
-	w.pool, err = qdb.PoolFromConf(confString.String(), qdb.WithMaxSenders(mif))
+	w.pool, err = qdb.PoolFromOptions(opts...)
 	if err != nil {
 		return
 	}
+
+	qdb.WithMaxSenders(mif)(w.pool)
 
 	if w.table, err = conf.FieldString("table"); err != nil {
 		return
@@ -277,8 +273,6 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		return err
 	}
 
-	panic("figure out which errors to return for the desired behavior of retrying the entire batch on a flush fail, or drop malformed messages? idk..")
-
 	defer func() {
 		// This will flush the sender, no need to call sender.Flush at the end of the method
 		tmpErr := q.pool.Release(ctx, sender)
@@ -287,7 +281,20 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		}
 	}()
 
-	return batch.WalkWithBatchedErrors(func(i int, m *service.Message) error {
+	return batch.WalkWithBatchedErrors(func(i int, m *service.Message) (err error) {
+		// QuestDB's LineSender constructs ILP messages using a buffer, so message
+		// components must be written in the correct order, otherwise the sender will
+		// return an error. This order is:
+		// 1. Table Name
+		// 2. Symbols (key/value pairs)
+		// 3. Columns (key/value pairs)
+		// 4. Timestamp [optional]
+		//
+		// Before writing any column, we call ensureTable(), which is guaranteed to run once
+		// and writes the table name before any other message data. Since it is also illegal
+		// to send an empty message (no symbols or columns), we also track if we've written
+		// anything by checking hasTable, which is set to true inside ensureTable().
+
 		var (
 			hasTable    bool
 			ensureTable = sync.OnceFunc(func() {
@@ -296,28 +303,36 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			})
 		)
 
+		defer func() {
+			if err != nil {
+				m.SetError(err)
+			}
+		}()
+
 		q.log.Tracef("Writing message %v", i)
 
 		jVal, err := m.AsStructuredMut()
 		if err != nil {
-			return fmt.Errorf("unable to parse json: %v", err)
+			return fmt.Errorf("unable to parse JSON: %v", err)
 		}
 		jObj, ok := jVal.(map[string]any)
 		if !ok {
 			return fmt.Errorf("expected JSON object, found '%T'", jVal)
 		}
 
-		// First handle symbols
+		// Step 1: Handle all symbols, which must be written to the buffer first
 		for s := range q.symbols {
 			val, found := jObj[s]
 			if found {
 				ensureTable()
 				sender.Symbol(s, fmt.Sprintf("%v", val))
+
+				// Delete the symbol so we don't iterate over it in the next step
 				delete(jObj, s)
 			}
 		}
 
-		// Then handle columns
+		// Step 2: Handle columns
 		for k, v := range jObj {
 
 			// Skip designated timestamp field
@@ -335,7 +350,8 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				continue
 			}
 
-			// For all non-timestamp fields, process values by JSON types since we are working with structured messages
+			// For all non-timestamp fields, process values by JSON types since we are working
+			// with structured messages
 			switch val := v.(type) {
 			case string:
 				ensureTable()
@@ -344,7 +360,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				ensureTable()
 				sender.BoolColumn(k, val)
 			case json.Number:
-				// For json numbers, first attempt to parse as int, then fallback to float
+				// For json numbers, first attempt to parse as int, then fall back to float
 				intVal, err := val.Int64()
 				if err == nil {
 					ensureTable()
@@ -367,7 +383,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			}
 		}
 
-		// Finally handle designated timestamp
+		// Step 3: Handle designated timestamp and finalize message in the buffer
 		var designatedTimestamp time.Time
 		if q.designatedTimestampField != "" {
 			val, found := jObj[q.designatedTimestampField]

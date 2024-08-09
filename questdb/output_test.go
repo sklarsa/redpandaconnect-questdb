@@ -80,7 +80,7 @@ func TestFromConf(t *testing.T) {
 	configSpec := questdbOutputConfig()
 	conf := `
 table: test
-client_conf_string: "http::addr=localhost:9000"
+address: "localhost:9000"
 designatedTimestampField: myDesignatedTimestamp
 timestampUnits: nanos
 timestampFields:
@@ -116,19 +116,19 @@ func TestValidationErrorsFromConf(t *testing.T) {
 		expectedErrContains string
 	}{
 		{
-			name:                "no client_conf_string",
+			name:                "no address",
 			conf:                "table: test",
-			expectedErrContains: "field 'client_conf_string' is required",
+			expectedErrContains: "field 'address' is required",
 		},
 		{
 			name:                "no table",
-			conf:                `client_conf_string: "http::addr=localhost:9000"`,
+			conf:                `address: "localhost:9000"`,
 			expectedErrContains: "field 'table' is required",
 		},
 		{
 			name: "invalid timestamp unit",
 			conf: `
-client_conf_string: "http:addr=localhost:9000"
+address: "localhost:9000"
 table: test
 timestampUnits: hello`,
 			expectedErrContains: "is not a valid timestamp unit",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,12 +15,27 @@ import (
 	"time"
 
 	_ "net/http/pprof"
+
+	"github.com/questdb/go-questdb-client/v3"
 )
 
 func main() {
 	go func() {
 		log.Println(http.ListenAndServe("localhost:6061", nil))
 	}()
+
+	ctx := context.TODO()
+
+	sender, err := questdb.LineSenderFromConf(ctx, "http::addr=localhost:7777;auto_flush=off;max_buf_size=0")
+	if err != nil {
+		panic(err)
+	}
+	var i int
+	for {
+		i++
+		println(i)
+		sender.Table("hi").Int64Column("bleh", rand.Int64()).AtNow(ctx)
+	}
 
 	var (
 		genThreads  = 1
