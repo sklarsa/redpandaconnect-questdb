@@ -282,17 +282,17 @@ func (q *questdbWriter) parseTimestamp(v any) (time.Time, error) {
 	case string:
 		t, err := time.Parse(q.timestampStringFormat, val)
 		if err != nil {
-			q.log.Errorf("QuestDB error: could not parse timestamp field %v", err)
+			q.log.Errorf("could not parse timestamp field %v", err)
 		}
 		return t, err
 	case json.Number:
 		intVal, err := val.Int64()
 		if err != nil {
-			q.log.Errorf("QuestDB error: numerical timestamps must be int64: %v", err)
+			q.log.Errorf("numerical timestamps must be int64: %v", err)
 		}
 		return q.timestampUnits.From(intVal), err
 	default:
-		err := fmt.Errorf("QuestDB error: unsupported type %T for designated timestamp: %v", v, v)
+		err := fmt.Errorf("unsupported type %T for designated timestamp: %v", v, v)
 		q.log.Error(err.Error())
 		return time.Time{}, err
 	}
@@ -305,15 +305,14 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 	sender, err = q.pool.Acquire(ctx)
 	if err != nil {
-		q.log.Errorf("QuestDB error: %v", err)
 		return err
 	}
 
 	defer func() {
 		// This will flush the sender, no need to call sender.Flush at the end of the method
-		err := q.pool.Release(ctx, sender)
+		err = q.pool.Release(ctx, sender)
 		if err != nil {
-			q.log.Errorf("QuestDB error: %v", err)
+			q.log.Errorf("%v", err)
 		}
 	}()
 
@@ -384,6 +383,8 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				if err == nil {
 					ensureTable()
 					sender.TimestampColumn(k, timestamp)
+				} else {
+					q.log.Error(err.Error())
 				}
 				continue
 			}
@@ -409,7 +410,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 						ensureTable()
 						sender.Float64Column(k, floatVal)
 					} else {
-						q.log.Errorf("QuestDB error: could not parse %v into a number: %v", val, err)
+						q.log.Errorf("could not parse %v into a number: %v", val, err)
 					}
 				}
 			case float64:
