@@ -144,12 +144,6 @@ type questdbWriter struct {
 
 func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPol service.BatchPolicy, mif int, err error) {
 
-	if conf.Contains("retry_timeout") {
-		println("lol")
-	} else {
-		println("yay")
-	}
-
 	opts := []qdb.LineSenderOption{
 		qdb.WithHttp(),
 		qdb.WithAutoFlushDisabled(),
