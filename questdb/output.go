@@ -261,9 +261,8 @@ func (q *questdbWriter) parseTimestamp(v any) (time.Time, error) {
 	}
 }
 
-func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
+func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) (err error) {
 	var (
-		err    error
 		sender qdb.LineSender
 	)
 
@@ -275,9 +274,9 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 	defer func() {
 		// This will flush the sender, no need to call sender.Flush at the end of the method
-		tmpErr := q.pool.Release(ctx, sender)
-		if tmpErr != nil {
-			q.log.Errorf("QuestDB error: %v", tmpErr)
+		err := q.pool.Release(ctx, sender)
+		if err != nil {
+			q.log.Errorf("QuestDB error: %v", err)
 		}
 	}()
 
@@ -294,7 +293,6 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		// and writes the table name before any other message data. Since it is also illegal
 		// to send an empty message (no symbols or columns), we also track if we've written
 		// anything by checking hasTable, which is set to true inside ensureTable().
-
 		var (
 			hasTable    bool
 			ensureTable = sync.OnceFunc(func() {
@@ -311,6 +309,9 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 		q.log.Tracef("Writing message %v", i)
 
+		// We need to process fields at most once, and in a specific order.
+		// So we use a mutable obj to delete fields written at an earlier stage
+		// of the message construction process.
 		jVal, err := m.AsStructuredMut()
 		if err != nil {
 			return fmt.Errorf("unable to parse JSON: %v", err)
@@ -320,7 +321,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			return fmt.Errorf("expected JSON object, found '%T'", jVal)
 		}
 
-		// Step 1: Handle all symbols, which must be written to the buffer first
+		// Stage 1: Handle all symbols, which must be written to the buffer first
 		for s := range q.symbols {
 			val, found := jObj[s]
 			if found {
@@ -332,15 +333,15 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			}
 		}
 
-		// Step 2: Handle columns
+		// Stage 2: Handle columns
 		for k, v := range jObj {
 
-			// Skip designated timestamp field
+			// Skip designated timestamp field (will process this in the 3rd stage)
 			if q.designatedTimestampField != "" && q.designatedTimestampField == k {
 				continue
 			}
 
-			// Then check if the field is a timestamp
+			// Then check if the field is a timestamp and process accordingly
 			if _, isTimestampField := q.timestampFields[k]; isTimestampField {
 				timestamp, err := q.parseTimestamp(v)
 				if err == nil {
@@ -383,7 +384,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			}
 		}
 
-		// Step 3: Handle designated timestamp and finalize message in the buffer
+		// Stage 3: Handle designated timestamp and finalize the buffered message
 		var designatedTimestamp time.Time
 		if q.designatedTimestampField != "" {
 			val, found := jObj[q.designatedTimestampField]
@@ -396,6 +397,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		}
 
 		if !hasTable {
+			// todo: make an option to return an error here
 			q.log.Warn("empty message, skipping send to QuestDB")
 			return nil
 		}
