@@ -18,7 +18,6 @@ http:
 input:
   broker:
     inputs:
-
       - batched:
           child:
             broker:
@@ -27,7 +26,6 @@ input:
                 - http_server: {}
           policy:
             check: this.contains("END BATCH")
-
 buffer:
   none: {}
 pipeline:

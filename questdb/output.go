@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +82,10 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Description("Password for HTTP basic auth").
 				Optional().
 				Secret(),
+			service.NewStringField("token").
+				Description("Bearer token for HTTP auth (takes precedence over basic auth username & password)").
+				Optional().
+				Secret(),
 			service.NewBoolField("tls_enabled").
 				Description("Use TLS to secure the connection to the server").
 				Optional(),
@@ -90,10 +93,18 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Description("Whether to verify the server's certificate. This should only be used for testing as a last resort and never used in production as it makes the connection vulnerable to man-in-the-middle attacks. Options are 'on' or 'unsafe_off'.").
 				Optional().
 				LintRule(`root = if ["on","unsafe_off"].contains(this != true { ["valid options are \"on\" or \"unsafe_off\"" ] }`),
-			service.NewStringField("token").
-				Description("Bearer token for HTTP auth (used in lieu of basic auth)").
+			service.NewDurationField("retry_timeout").
+				Description("The time to continue retrying after a failed HTTP request. The interval between retries is an exponential backoff starting at 10ms and doubling after each failed attempt up to a maximum of 1 second.").
 				Optional().
-				Secret(),
+				Advanced(),
+			service.NewDurationField("request_timeout").
+				Description("The time to wait for a response from the server. This is in addition to the calculation derived from the request_min_throughput parameter.").
+				Optional().
+				Advanced(),
+			service.NewIntField("request_min_throughput").
+				Description("Minimum expected throughput in bytes per second for HTTP requests. If the throughput is lower than this value, the connection will time out. This is used to calculate an additional timeout on top of request_timeout. This is useful for large requests. You can set this value to 0 to disable this logic.").
+				Optional().
+				Advanced(),
 			service.NewStringField("table").
 				Description("Destination table").
 				Example("trades"),
@@ -132,6 +143,12 @@ type questdbWriter struct {
 }
 
 func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPol service.BatchPolicy, mif int, err error) {
+
+	if conf.Contains("retry_timeout") {
+		println("lol")
+	} else {
+		println("yay")
+	}
 
 	opts := []qdb.LineSenderOption{
 		qdb.WithHttp(),
@@ -181,53 +198,79 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 
 	qdb.WithMaxSenders(mif)(w.pool)
 
+	if conf.Contains("retry_timeout") {
+		var retryTimeout time.Duration
+		if retryTimeout, err = conf.FieldDuration("retry_timeout"); err != nil {
+			return
+		}
+		qdb.WithRetryTimeout(retryTimeout)
+	}
+
+	if conf.Contains("request_timeout") {
+		var requestTimeout time.Duration
+		if requestTimeout, err = conf.FieldDuration("request_timeout"); err != nil {
+			return
+		}
+		qdb.WithRequestTimeout(requestTimeout)
+	}
+
+	if conf.Contains("request_min_throughput") {
+		var requestMinThroughput int
+		if requestMinThroughput, err = conf.FieldInt("request_min_throughput"); err != nil {
+			return
+		}
+		qdb.WithMinThroughput(requestMinThroughput)
+	}
+
 	if w.table, err = conf.FieldString("table"); err != nil {
 		return
 	}
 
 	var symbols []string
-	symbols, err = conf.FieldStringList("symbols")
-	if err != nil {
-		return
-	}
-	for _, s := range symbols {
-		w.symbols[s] = true
+	if conf.Contains("symbols") {
+		if symbols, err = conf.FieldStringList("symbols"); err != nil {
+			return
+		}
+		for _, s := range symbols {
+			w.symbols[s] = true
+		}
 	}
 
 	var timestampFields []string
-	if timestampFields, err = conf.FieldStringList("timestampFields"); err != nil {
-		if !strings.Contains(err.Error(), "was not found in the config") {
+	if conf.Contains("timestampFields") {
+		if timestampFields, err = conf.FieldStringList("timestampFields"); err != nil {
 			return
 		}
-
+		for _, f := range timestampFields {
+			w.timestampFields[f] = true
+		}
 	}
-	for _, f := range timestampFields {
-		w.timestampFields[f] = true
-	}
 
-	if w.designatedTimestampField, err = conf.FieldString("designatedTimestampField"); err != nil {
-		if !strings.Contains(err.Error(), "was not found in the config") {
+	if conf.Contains("designatedTimestampField") {
+		if w.designatedTimestampField, err = conf.FieldString("designatedTimestampField"); err != nil {
 			return
 		}
 	}
 
 	var timestampUnits string
-	if timestampUnits, err = conf.FieldString("timestampUnits"); err != nil {
-		if !strings.Contains(err.Error(), "was not found in the config") {
+	if conf.Contains("timestampUnits") {
+		if timestampUnits, err = conf.FieldString("timestampUnits"); err != nil {
 			return
 		}
-	}
-	// perform validation on timestamp units here in case the user doesn't lint the config
-	w.timestampUnits = timestampUnit(timestampUnits)
-	if !w.timestampUnits.IsValid() {
-		err = fmt.Errorf("%v is not a valid timestamp unit", timestampUnits)
-		return
+
+		// perform validation on timestamp units here in case the user doesn't lint the config
+		w.timestampUnits = timestampUnit(timestampUnits)
+		if !w.timestampUnits.IsValid() {
+			err = fmt.Errorf("%v is not a valid timestamp unit", timestampUnits)
+			return
+		}
 	}
 
-	if w.timestampStringFormat, err = conf.FieldString("timestampStringFormat"); err != nil {
-		if !strings.Contains(err.Error(), "was not found in the config") {
+	if conf.Contains("timestampStringFormat") {
+		if w.timestampStringFormat, err = conf.FieldString("timestampStringFormat"); err != nil {
 			return
 		}
+
 	}
 
 	return
