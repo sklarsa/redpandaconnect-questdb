@@ -16,21 +16,37 @@ http:
     algorithm: sha256
     salt: ""
 input:
-  #http_server: {}
-  stdin: {}
+  broker:
+    inputs:
+
+      - batched:
+          child:
+            broker:
+              inputs:
+                - stdin: {}
+                - http_server: {}
+          policy:
+            check: this.contains("END BATCH")
+
 buffer:
   none: {}
 pipeline:
   threads: -1
   processors: []
 output:
-  questdb:
-    address: localhost:9000
-    table: hello3
-    max_in_flight: 256
-    timestampFields:
-      - t
-    designatedTimestampField: "d"
+  fallback:
+    - reject_errored:
+        questdb:
+          address: localhost:9000
+          table: hello3
+          max_in_flight: 256
+          timestampFields:
+            - t
+          designatedTimestampField: "d"
+
+    - stdout: {}
+
+
 input_resources: []
 processor_resources: []
 output_resources: []
