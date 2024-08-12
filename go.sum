@@ -909,6 +909,8 @@ github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240809161154-8e60b7ff0d17 h1:
 github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240809161154-8e60b7ff0d17/go.mod h1:kXoftTVQZlksdJ9tsHQRWfdWO5Kyl4bZuKotyyeWa3c=
 github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240809163014-61f3491fe28a h1:uyUYb/xo8C8wu1KjofSYTpPmWrCWmcc8uVWzWaUsQeg=
 github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240809163014-61f3491fe28a/go.mod h1:kXoftTVQZlksdJ9tsHQRWfdWO5Kyl4bZuKotyyeWa3c=
+github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240812134207-53a2d3544552 h1:vPffb84WZj3dMz5NwBki+zOGVgrru2AQ6UdkXqzfitk=
+github.com/questdb/go-questdb-client/v3 v3.1.1-0.20240812134207-53a2d3544552/go.mod h1:kXoftTVQZlksdJ9tsHQRWfdWO5Kyl4bZuKotyyeWa3c=
 github.com/quipo/dependencysolver v0.0.0-20170801134659-2b009cb4ddcc h1:hK577yxEJ2f5s8w2iy2KimZmgrdAUZUNftE1ESmg2/Q=
 github.com/quipo/dependencysolver v0.0.0-20170801134659-2b009cb4ddcc/go.mod h1:OQt6Zo5B3Zs+C49xul8kcHo+fZ1mCLPvd0LFxiZ2DHc=
 github.com/r3labs/diff/v3 v3.0.1 h1:CBKqf3XmNRHXKmdU7mZP1w7TV0pDyVCis1AUHtA4Xtg=

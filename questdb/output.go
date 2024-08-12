@@ -3,6 +3,7 @@ package questdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -126,6 +127,10 @@ func questdbOutputConfig() *service.ConfigSpec {
 			service.NewStringListField("symbols").
 				Description("Columns that should be the SYMBOL type (string values default to STRING)").
 				Optional(),
+			service.NewBoolField("errorOnEmptyMessages").
+				Description("Mark a message as errored if it is empty after field validation").
+				Optional().
+				Default(false),
 		)
 }
 
@@ -140,6 +145,7 @@ type questdbWriter struct {
 	timestampUnits           timestampUnit
 	timestampStringFormat    string
 	timestampFields          map[string]bool
+	errorOnEmptyMessages     bool
 }
 
 func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPol service.BatchPolicy, mif int, err error) {
@@ -267,6 +273,10 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 
 	}
 
+	if w.errorOnEmptyMessages, err = conf.FieldBool("errorOnEmptyMessages"); err != nil {
+		return
+	}
+
 	return
 }
 
@@ -310,9 +320,13 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 	defer func() {
 		// This will flush the sender, no need to call sender.Flush at the end of the method
-		err = q.pool.Release(ctx, sender)
-		if err != nil {
-			q.log.Errorf("%v", err)
+		releaseErr := q.pool.Release(ctx, sender)
+		if releaseErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%v %w", err, releaseErr)
+			} else {
+				err = releaseErr
+			}
 		}
 	}()
 
@@ -345,8 +359,8 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 		q.log.Tracef("Writing message %v", i)
 
-		// We need to process fields at most once, and in a specific order.
-		// So we use a mutable obj to delete fields written at an earlier stage
+		// Fields must be written in a particular order by type, so
+		// we use a mutable obj to delete fields written at an earlier stage
 		// of the message construction process.
 		jVal, err := m.AsStructuredMut()
 		if err != nil {
@@ -377,14 +391,14 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				continue
 			}
 
-			// Then check if the field is a timestamp and process accordingly
+			// Check if the field is a timestamp and process accordingly
 			if _, isTimestampField := q.timestampFields[k]; isTimestampField {
 				timestamp, err := q.parseTimestamp(v)
 				if err == nil {
 					ensureTable()
 					sender.TimestampColumn(k, timestamp)
 				} else {
-					q.log.Error(err.Error())
+					q.log.Errorf("%v", err)
 				}
 				continue
 			}
@@ -435,7 +449,9 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		}
 
 		if !hasTable {
-			// todo: make an option to return an error here
+			if q.errorOnEmptyMessages {
+				return errors.New("empty message, skipping send to QuestDB")
+			}
 			q.log.Warn("empty message, skipping send to QuestDB")
 			return nil
 		}
