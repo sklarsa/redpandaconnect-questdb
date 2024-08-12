@@ -1,22 +1,17 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	rand "math/rand/v2"
+	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	_ "net/http/pprof"
-
-	"github.com/questdb/go-questdb-client/v3"
 )
 
 func main() {
@@ -24,22 +19,8 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6061", nil))
 	}()
 
-	ctx := context.TODO()
-
-	sender, err := questdb.LineSenderFromConf(ctx, "http::addr=localhost:7777;auto_flush=off;max_buf_size=0")
-	if err != nil {
-		panic(err)
-	}
-	var i int
-	for {
-		i++
-		println(i)
-		sender.Table("hi").Int64Column("bleh", rand.Int64()).AtNow(ctx)
-	}
-
 	var (
-		genThreads  = 1
-		sendThreads = 64
+		genThreads = 1
 	)
 	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
 	http.DefaultTransport.(*http.Transport).MaxIdleConns = 100
@@ -55,8 +36,7 @@ func main() {
 		},
 		once: &sync.Once{},
 
-		genThreads:  genThreads,
-		sendThreads: sendThreads,
+		genThreads: genThreads,
 
 		benthosEndpoint: "http://localhost:4195/post",
 	}
@@ -76,10 +56,9 @@ type generator struct {
 	fields map[string]field
 	once   *sync.Once
 
-	buf chan string
+	buf chan []byte
 
-	genThreads  int
-	sendThreads int
+	genThreads int
 
 	benthosEndpoint string
 }
@@ -87,7 +66,7 @@ type generator struct {
 func (g *generator) start() {
 	g.once.Do(func() {
 
-		g.buf = make(chan string, g.bufSize)
+		g.buf = make(chan []byte, g.bufSize)
 		for range g.genThreads {
 			go func() {
 				for {
@@ -101,39 +80,31 @@ func (g *generator) start() {
 						panic(err)
 					}
 
-					g.buf <- string(msg)
+					g.buf <- msg
 
 				}
 
 			}()
 		}
 
-		for range g.sendThreads {
-			go func() {
-				for {
+		go func() {
+			conn, err := net.Dial("tcp", "0.0.0.0:6000")
+			if err != nil {
+				panic(err)
+			}
+			defer conn.Close()
 
-					resp, err := http.Post(
-						g.benthosEndpoint,
-						"application/json",
-						strings.NewReader(<-g.buf),
-					)
-
-					if err != nil {
-						fmt.Printf("error: %v\n", err)
-						time.Sleep(time.Millisecond * 100)
-						continue
-					}
-
-					if resp.StatusCode > 399 {
-						fmt.Printf("%d: %v\n", resp.StatusCode, resp.Status)
-					}
-
-					io.Copy(ioutil.Discard, resp.Body)
-					resp.Body.Close()
-
+			for {
+				_, err := conn.Write(<-g.buf)
+				if err != nil {
+					panic(err)
 				}
-			}()
-		}
+				_, err = conn.Write([]byte("\n"))
+				if err != nil {
+					panic(err)
+				}
+			}
+		}()
 	})
 }
 

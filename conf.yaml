@@ -18,14 +18,10 @@ http:
 input:
   broker:
     inputs:
-      - batched:
-          child:
-            broker:
-              inputs:
-                - stdin: {}
-                - http_server: {}
-          policy:
-            check: this.contains("END BATCH")
+      - stdin: {}
+      - socket_server:
+          network: "tcp"
+          address: 0.0.0.0:6000
 buffer:
   none: {}
 pipeline:
@@ -41,9 +37,11 @@ output:
           timestampFields:
             - t
           designatedTimestampField: "d"
-
+          batching:
+            count: 2000
+            period: 10s
+            check: this.contains("END BATCH")
     - stdout: {}
-
 
 input_resources: []
 processor_resources: []

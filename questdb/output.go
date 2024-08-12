@@ -87,23 +87,28 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Description("Bearer token for HTTP auth (takes precedence over basic auth username & password)").
 				Optional().
 				Secret(),
-			service.NewBoolField("tls_enabled").
+			service.NewBoolField("tlsEnabled").
 				Description("Use TLS to secure the connection to the server").
 				Optional(),
-			service.NewStringField("tls_verify").
-				Description("Whether to verify the server's certificate. This should only be used for testing as a last resort and never used in production as it makes the connection vulnerable to man-in-the-middle attacks. Options are 'on' or 'unsafe_off'.").
+			service.NewStringField("tlsVerify").
+				Description("Whether to verify the server's certificate. This should only be used for testing as a last resort "+
+					"and never used in production as it makes the connection vulnerable to man-in-the-middle attacks. Options are 'on' or 'unsafe_off'.").
 				Optional().
+				Default("on").
 				LintRule(`root = if ["on","unsafe_off"].contains(this != true { ["valid options are \"on\" or \"unsafe_off\"" ] }`),
-			service.NewDurationField("retry_timeout").
-				Description("The time to continue retrying after a failed HTTP request. The interval between retries is an exponential backoff starting at 10ms and doubling after each failed attempt up to a maximum of 1 second.").
+			service.NewDurationField("retryTimeout").
+				Description("The time to continue retrying after a failed HTTP request. The interval between retries is an exponential "+
+					"backoff starting at 10ms and doubling after each failed attempt up to a maximum of 1 second.").
 				Optional().
 				Advanced(),
-			service.NewDurationField("request_timeout").
-				Description("The time to wait for a response from the server. This is in addition to the calculation derived from the request_min_throughput parameter.").
+			service.NewDurationField("requestTimeout").
+				Description("The time to wait for a response from the server. This is in addition to the calculation derived from the requestMinThroughput parameter.").
 				Optional().
 				Advanced(),
-			service.NewIntField("request_min_throughput").
-				Description("Minimum expected throughput in bytes per second for HTTP requests. If the throughput is lower than this value, the connection will time out. This is used to calculate an additional timeout on top of request_timeout. This is useful for large requests. You can set this value to 0 to disable this logic.").
+			service.NewIntField("requestMinThroughput").
+				Description("Minimum expected throughput in bytes per second for HTTP requests. If the throughput is lower than this value, "+
+					"the connection will time out. This is used to calculate an additional timeout on top of requestTimeout. This is useful for large requests. "+
+					"You can set this value to 0 to disable this logic.").
 				Optional().
 				Advanced(),
 			service.NewStringField("table").
@@ -155,8 +160,28 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		qdb.WithAutoFlushDisabled(),
 	}
 
-	if tls, _ := conf.FieldBool("tls_enabled"); tls {
-		opts = append(opts, qdb.WithTls())
+	if conf.Contains("tlsEnabled") {
+		var tls bool
+		if tls, err = conf.FieldBool("tlsEnabled"); err != nil {
+			return
+		}
+		if tls {
+			opts = append(opts, qdb.WithTls())
+		}
+	}
+
+	var tlsVerify string
+	if tlsVerify, err = conf.FieldString("tlsVerify"); err != nil {
+		return
+	}
+	switch tlsVerify {
+	case "on":
+		break
+	case "unsafe_off":
+		opts = append(opts, qdb.WithTlsInsecureSkipVerify())
+	default:
+		err = fmt.Errorf("invalid tlsVerify setting: %s", tlsVerify)
+		return
 	}
 
 	var addr string
@@ -198,25 +223,25 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 
 	qdb.WithMaxSenders(mif)(w.pool)
 
-	if conf.Contains("retry_timeout") {
+	if conf.Contains("retryTimeout") {
 		var retryTimeout time.Duration
-		if retryTimeout, err = conf.FieldDuration("retry_timeout"); err != nil {
+		if retryTimeout, err = conf.FieldDuration("retryTimeout"); err != nil {
 			return
 		}
 		qdb.WithRetryTimeout(retryTimeout)
 	}
 
-	if conf.Contains("request_timeout") {
+	if conf.Contains("requestTimeout") {
 		var requestTimeout time.Duration
-		if requestTimeout, err = conf.FieldDuration("request_timeout"); err != nil {
+		if requestTimeout, err = conf.FieldDuration("requestTimeout"); err != nil {
 			return
 		}
 		qdb.WithRequestTimeout(requestTimeout)
 	}
 
-	if conf.Contains("request_min_throughput") {
+	if conf.Contains("requestMinThroughput") {
 		var requestMinThroughput int
-		if requestMinThroughput, err = conf.FieldInt("request_min_throughput"); err != nil {
+		if requestMinThroughput, err = conf.FieldInt("requestMinThroughput"); err != nil {
 			return
 		}
 		qdb.WithMinThroughput(requestMinThroughput)
