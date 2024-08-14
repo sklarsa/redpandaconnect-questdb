@@ -338,14 +338,14 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		sender qdb.LineSender
 	)
 
-	sender, err = q.pool.Acquire(ctx)
+	sender, err = q.pool.Sender(ctx)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
 		// This will flush the sender, no need to call sender.Flush at the end of the method
-		releaseErr := q.pool.Release(ctx, sender)
+		releaseErr := sender.Close(ctx)
 		if releaseErr != nil {
 			if err != nil {
 				err = fmt.Errorf("%v %w", err, releaseErr)
