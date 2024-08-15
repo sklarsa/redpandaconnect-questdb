@@ -67,7 +67,7 @@ func (t timestampUnit) From(value int64) time.Time {
 func questdbOutputConfig() *service.ConfigSpec {
 	return service.NewConfigSpec().
 		Summary("Pushes messages a QuestDB table").
-		Description(`This output a sink that accepts structured messages and stores them to in a QuestDB table `+service.OutputPerformanceDocs(true, true)).
+		Description(`Todo: fill this in`+service.OutputPerformanceDocs(true, true)).
 		Categories("Services").
 		Fields(
 			service.NewOutputMaxInFlightField(),
