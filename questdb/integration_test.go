@@ -3,6 +3,7 @@ package questdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,7 +78,21 @@ func TestIntegrationQuestDBConfigOptions(t *testing.T) {
 		qdbConfig string
 		input     []string
 		validate  func(context.Context, *pgconn.PgConn)
-	}{}
+	}{
+		{
+			name:      "basic test",
+			qdbConfig: "",
+			input: []string{
+				`{"hello": "world"}`,
+			},
+			validate: func(ctx context.Context, pgConn *pgconn.PgConn) {
+				result := pgConn.ExecParams(ctx, "SELECT hello FROM hello", nil, nil, nil, nil)
+
+				result.NextRow()
+				assert.Equal(t, "world", string(result.Values()[0]))
+			},
+		},
+	}
 
 	pool := setupDockertestPool(t)
 	ctx := context.Background()
@@ -86,9 +101,10 @@ func TestIntegrationQuestDBConfigOptions(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			qdb := setupQuestDB(t, ctx, pool)
-			// todo: pass qdb port to qdbConfig
-			benthos := setupBenthos(t, pool, tc.qdbConfig)
+			benthos := setupBenthos(t, pool, tc.qdbConfig, qdb)
 
 			for _, line := range tc.input {
 				resp, err := http.Post(
@@ -155,10 +171,20 @@ func setupQuestDB(t *testing.T, ctx context.Context, pool *dockertest.Pool) *doc
 	return resource
 }
 
-func setupBenthos(t *testing.T, pool *dockertest.Pool, qdbConf string) *dockertest.Resource {
+func setupBenthos(t *testing.T, pool *dockertest.Pool, qdbConf string, qdb *dockertest.Resource) *dockertest.Resource {
 	tmp := t.TempDir()
 
-	// todo: construct basic config (http input) and inject output config with qdbconf
+	conf := fmt.Sprintf(`---
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+input:
+  http_server: {}
+output:
+  questdb:
+    address: "localhost:%v"
+    table: hello
+`, qdb.GetPort("4195/tcp")) + qdbConf
 
 	require.NoError(t, os.WriteFile(path.Join(tmp, "config.yaml"), []byte(conf), 0444))
 
@@ -166,7 +192,7 @@ func setupBenthos(t *testing.T, pool *dockertest.Pool, qdbConf string) *dockerte
 		Repository: "jeffail/benthos",
 		Tag:        "4.27",
 		Mounts: []string{
-			path.Join(tmp, "config.yaml", "/benthos.yaml"),
+			fmt.Sprintf("%v:%v", path.Join(tmp, "config.yaml"), "/benthos.yaml"),
 		},
 	})
 
@@ -175,8 +201,26 @@ func setupBenthos(t *testing.T, pool *dockertest.Pool, qdbConf string) *dockerte
 		assert.NoError(t, pool.Purge(resource))
 	})
 
-	// todo: wait until container http server is listening...
+	if err = pool.Retry(func() error {
+		resp, err := http.Get(
+			fmt.Sprintf("http://localhost:%v", resource.GetPort("4195/tcp")),
+		)
+		if err != nil {
+			return err
+		}
 
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return errors.New("not ready")
+		}
+
+		return nil
+
+	}); err != nil {
+		t.Fatalf("Could not connect to docker resource: %s", err)
+	}
 	_ = resource.Expire(900)
 
 	return resource
