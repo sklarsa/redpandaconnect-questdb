@@ -389,7 +389,7 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		// Fields must be written in a particular order by type, so
 		// we use a mutable obj to delete fields written at an earlier stage
 		// of the message construction process.
-		jVal, err := m.AsStructuredMut()
+		jVal, err := m.AsStructured()
 		if err != nil {
 			return fmt.Errorf("unable to parse JSON: %v", err)
 		}
@@ -404,9 +404,6 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			if found {
 				ensureTable()
 				sender.Symbol(s, fmt.Sprintf("%v", val))
-
-				// Delete the symbol so we don't iterate over it in the next step
-				delete(jObj, s)
 			}
 		}
 
@@ -415,6 +412,11 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 			// Skip designated timestamp field (will process this in the 3rd stage)
 			if q.designatedTimestampField != "" && q.designatedTimestampField == k {
+				continue
+			}
+
+			// Skip symbols since we already wrote them
+			if _, isSymbol := q.symbols[k]; isSymbol {
 				continue
 			}
 
