@@ -34,7 +34,7 @@ output:
           address: localhost:9000
           table: hello3
           max_in_flight: 256
-          timestampFields:
+          timestampStringFields:
             - t
           designatedTimestampField: "d"
           batching:
