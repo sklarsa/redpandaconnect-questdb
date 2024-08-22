@@ -19,9 +19,7 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6061", nil))
 	}()
 
-	var (
-		genThreads = 1
-	)
+	const genThreads = 1
 	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
 	http.DefaultTransport.(*http.Transport).MaxIdleConns = 100
 
@@ -45,8 +43,6 @@ func main() {
 
 	for {
 		time.Sleep(time.Second * 5)
-		fmt.Printf("buf size: %d\n", len(g.buf))
-
 	}
 }
 
@@ -65,7 +61,6 @@ type generator struct {
 
 func (g *generator) start() {
 	g.once.Do(func() {
-
 		g.buf = make(chan []byte, g.bufSize)
 		for range g.genThreads {
 			go func() {
@@ -81,13 +76,13 @@ func (g *generator) start() {
 					}
 
 					g.buf <- msg
-
 				}
-
 			}()
 		}
 
 		go func() {
+			const batchSize = 100000
+
 			conn, err := net.Dial("tcp", "0.0.0.0:6000")
 			if err != nil {
 				panic(err)
@@ -95,14 +90,19 @@ func (g *generator) start() {
 			defer conn.Close()
 
 			for {
-				_, err := conn.Write(<-g.buf)
-				if err != nil {
-					panic(err)
+				start := time.Now()
+				for i := 0; i < batchSize; i++ {
+					_, err := conn.Write(<-g.buf)
+					if err != nil {
+						panic(err)
+					}
+					_, err = conn.Write([]byte("\n"))
+					if err != nil {
+						panic(err)
+					}
 				}
-				_, err = conn.Write([]byte("\n"))
-				if err != nil {
-					panic(err)
-				}
+				rate := batchSize * (1000 / float64(time.Since(start).Milliseconds()))
+				fmt.Printf("rate: %f rows/s\n", rate)
 			}
 		}()
 	})
@@ -138,15 +138,5 @@ type stringField struct {
 }
 
 func (f stringField) value() any {
-	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
-
-	ran_str := make([]byte, f.length)
-
-	// Generating Random string
-	for i := 0; i < f.length; i++ {
-		ran_str[i] = charset[rand.IntN(len(charset))]
-	}
-
-	// Displaying the random string
-	return string(ran_str)
+	return "just_a_looooooooooooooooooong_string_value"
 }
