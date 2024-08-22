@@ -65,7 +65,7 @@ func (t timestampUnit) From(value int64) time.Time {
 func questdbOutputConfig() *service.ConfigSpec {
 	return service.NewConfigSpec().
 		Summary("Pushes messages a QuestDB table").
-		Description(`Todo: fill this in`+service.OutputPerformanceDocs(true, true)).
+		Description(`Important: We recommend that the dedupe feature is enabled on the QuestDB server`+service.OutputPerformanceDocs(true, true)).
 		Categories("Services").
 		Fields(
 			service.NewOutputMaxInFlightField(),
@@ -115,12 +115,12 @@ func questdbOutputConfig() *service.ConfigSpec {
 			service.NewStringField("designatedTimestampField").
 				Description("Name of the designated timestamp field").
 				Optional(),
-			service.NewStringField("timestampUnits").
+			service.NewStringField("designatedTimestampUnit").
 				Description("Designated timestamp field units").
 				Default("auto").
 				LintRule(`root = if ["nanos","micros","millis","seconds","auto"].contains(this) != true { [ "valid options are \"nanos\", \"micros\", \"millis\", \"seconds\", \"auto\"" ] }`).
 				Optional(),
-			service.NewStringListField("timestampFields").
+			service.NewStringListField("timestampStringFields").
 				Description("String fields with textual timestamps").
 				Optional(),
 			service.NewStringField("timestampStringFormat").
@@ -134,6 +134,8 @@ func questdbOutputConfig() *service.ConfigSpec {
 				Description("Mark a message as errored if it is empty after field validation").
 				Optional().
 				Default(false),
+
+			// todo: add doubles
 		)
 }
 
@@ -145,9 +147,9 @@ type questdbWriter struct {
 	symbols                  map[string]bool
 	table                    string
 	designatedTimestampField string
-	timestampUnits           timestampUnit
+	designatedTimestampUnit  timestampUnit
 	timestampStringFormat    string
-	timestampFields          map[string]bool
+	timestampStringFields    map[string]bool
 	errorOnEmptyMessages     bool
 }
 
@@ -199,9 +201,9 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 	}
 
 	w := &questdbWriter{
-		log:             mgr.Logger(),
-		symbols:         map[string]bool{},
-		timestampFields: map[string]bool{},
+		log:                   mgr.Logger(),
+		symbols:               map[string]bool{},
+		timestampStringFields: map[string]bool{},
 	}
 	out = w
 
@@ -258,13 +260,13 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		}
 	}
 
-	var timestampFields []string
-	if conf.Contains("timestampFields") {
-		if timestampFields, err = conf.FieldStringList("timestampFields"); err != nil {
+	var timestampStringFields []string
+	if conf.Contains("timestampStringFields") {
+		if timestampStringFields, err = conf.FieldStringList("timestampStringFields"); err != nil {
 			return
 		}
-		for _, f := range timestampFields {
-			w.timestampFields[f] = true
+		for _, f := range timestampStringFields {
+			w.timestampStringFields[f] = true
 		}
 	}
 
@@ -274,16 +276,16 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		}
 	}
 
-	var timestampUnits string
-	if conf.Contains("timestampUnits") {
-		if timestampUnits, err = conf.FieldString("timestampUnits"); err != nil {
+	var designatedTimestampUnit string
+	if conf.Contains("designatedTimestampUnit") {
+		if designatedTimestampUnit, err = conf.FieldString("designatedTimestampUnit"); err != nil {
 			return
 		}
 
 		// perform validation on timestamp units here in case the user doesn't lint the config
-		w.timestampUnits = timestampUnit(timestampUnits)
-		if !w.timestampUnits.IsValid() {
-			err = fmt.Errorf("%v is not a valid timestamp unit", timestampUnits)
+		w.designatedTimestampUnit = timestampUnit(designatedTimestampUnit)
+		if !w.designatedTimestampUnit.IsValid() {
+			err = fmt.Errorf("%v is not a valid timestamp unit", designatedTimestampUnit)
 			return
 		}
 	}
@@ -321,7 +323,7 @@ func (q *questdbWriter) parseTimestamp(v any) (time.Time, error) {
 		if err != nil {
 			q.log.Errorf("numerical timestamps must be int64: %v", err)
 		}
-		return q.timestampUnits.From(intVal), err
+		return q.designatedTimestampUnit.From(intVal), err
 	default:
 		err := fmt.Errorf("unsupported type %T for designated timestamp: %v", v, v)
 		q.log.Error(err.Error())
@@ -395,8 +397,13 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				continue
 			}
 
+			// Skip symbols since we already wrote them
+			if _, isSymbol := q.symbols[k]; isSymbol {
+				continue
+			}
+
 			// Check if the field is a timestamp and process accordingly
-			if _, isTimestampField := q.timestampFields[k]; isTimestampField {
+			if _, isTimestampField := q.timestampStringFields[k]; isTimestampField {
 				timestamp, err := q.parseTimestamp(v)
 				if err == nil {
 					if !hasTable {
