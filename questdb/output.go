@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	qdb "github.com/questdb/go-questdb-client/v3"
@@ -27,7 +26,6 @@ const (
 )
 
 func guessTimestampUnits(timestamp int64) timestampUnit {
-
 	if timestamp < 10000000000 {
 		return seconds
 	} else if timestamp < 10000000000000 { // 11/20/2286, 5:46:40 PM in millis and 4/26/1970, 5:46:40 PM in micros
@@ -154,7 +152,6 @@ type questdbWriter struct {
 }
 
 func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPol service.BatchPolicy, mif int, err error) {
-
 	opts := []qdb.LineSenderOption{
 		qdb.WithHttp(),
 		qdb.WithAutoFlushDisabled(),
@@ -295,7 +292,6 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		if w.timestampStringFormat, err = conf.FieldString("timestampStringFormat"); err != nil {
 			return
 		}
-
 	}
 
 	if w.errorOnEmptyMessages, err = conf.FieldBool("errorOnEmptyMessages"); err != nil {
@@ -334,28 +330,12 @@ func (q *questdbWriter) parseTimestamp(v any) (time.Time, error) {
 }
 
 func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) (err error) {
-	var (
-		sender qdb.LineSender
-	)
-
-	sender, err = q.pool.Sender(ctx)
+	sender, err := q.pool.Sender(ctx)
 	if err != nil {
 		return err
 	}
 
-	defer func() {
-		// This will flush the sender, no need to call sender.Flush at the end of the method
-		releaseErr := sender.Close(ctx)
-		if releaseErr != nil {
-			if err != nil {
-				err = fmt.Errorf("%v %w", err, releaseErr)
-			} else {
-				err = releaseErr
-			}
-		}
-	}()
-
-	return batch.WalkWithBatchedErrors(func(i int, m *service.Message) (err error) {
+	err = batch.WalkWithBatchedErrors(func(i int, m *service.Message) (err error) {
 		// QuestDB's LineSender constructs ILP messages using a buffer, so message
 		// components must be written in the correct order, otherwise the sender will
 		// return an error. This order is:
@@ -364,55 +344,54 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 		// 3. Columns (key/value pairs)
 		// 4. Timestamp [optional]
 		//
-		// Before writing any column, we call ensureTable(), which is guaranteed to run once
-		// and writes the table name before any other message data. Since it is also illegal
-		// to send an empty message (no symbols or columns), we also track if we've written
-		// anything by checking hasTable, which is set to true inside ensureTable().
-		var (
-			hasTable    bool
-			ensureTable = sync.OnceFunc(func() {
-				sender.Table(q.table)
-				hasTable = true
-			})
-		)
-
-		defer func() {
-			if err != nil {
-				m.SetError(err)
-			}
-		}()
+		// Before writing any column, we call Table(), which is guaranteed to run once.
+		// hasTable flag is used for that.
+		var hasTable bool
 
 		q.log.Tracef("Writing message %v", i)
 
 		// Fields must be written in a particular order by type, so
 		// we use a mutable obj to delete fields written at an earlier stage
 		// of the message construction process.
-		jVal, err := m.AsStructuredMut()
+		jVal, err := m.AsStructured()
 		if err != nil {
-			return fmt.Errorf("unable to parse JSON: %v", err)
+			err = fmt.Errorf("unable to parse JSON: %v", err)
+			m.SetError(err)
+			return err
 		}
 		jObj, ok := jVal.(map[string]any)
 		if !ok {
-			return fmt.Errorf("expected JSON object, found '%T'", jVal)
+			err = fmt.Errorf("expected JSON object, found '%T'", jVal)
+			m.SetError(err)
+			return err
 		}
 
 		// Stage 1: Handle all symbols, which must be written to the buffer first
 		for s := range q.symbols {
-			val, found := jObj[s]
+			v, found := jObj[s]
 			if found {
-				ensureTable()
-				sender.Symbol(s, fmt.Sprintf("%v", val))
-
-				// Delete the symbol so we don't iterate over it in the next step
-				delete(jObj, s)
+				if !hasTable {
+					sender.Table(q.table)
+					hasTable = true
+				}
+				switch val := v.(type) {
+				case string:
+					sender.Symbol(s, val)
+				default:
+					sender.Symbol(s, fmt.Sprintf("%v", val))
+				}
 			}
 		}
 
 		// Stage 2: Handle columns
 		for k, v := range jObj {
-
 			// Skip designated timestamp field (will process this in the 3rd stage)
-			if q.designatedTimestampField != "" && q.designatedTimestampField == k {
+			if q.designatedTimestampField == k {
+				continue
+			}
+
+			// Skip symbols
+			if _, ok := q.symbols[k]; ok {
 				continue
 			}
 
@@ -420,7 +399,10 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			if _, isTimestampField := q.timestampFields[k]; isTimestampField {
 				timestamp, err := q.parseTimestamp(v)
 				if err == nil {
-					ensureTable()
+					if !hasTable {
+						sender.Table(q.table)
+						hasTable = true
+					}
 					sender.TimestampColumn(k, timestamp)
 				} else {
 					q.log.Errorf("%v", err)
@@ -432,21 +414,33 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			// with structured messages
 			switch val := v.(type) {
 			case string:
-				ensureTable()
+				if !hasTable {
+					sender.Table(q.table)
+					hasTable = true
+				}
 				sender.StringColumn(k, val)
 			case bool:
-				ensureTable()
+				if !hasTable {
+					sender.Table(q.table)
+					hasTable = true
+				}
 				sender.BoolColumn(k, val)
 			case json.Number:
 				// For json numbers, first attempt to parse as int, then fall back to float
 				intVal, err := val.Int64()
 				if err == nil {
-					ensureTable()
+					if !hasTable {
+						sender.Table(q.table)
+						hasTable = true
+					}
 					sender.Int64Column(k, intVal)
 				} else {
 					floatVal, err := val.Float64()
 					if err == nil {
-						ensureTable()
+						if !hasTable {
+							sender.Table(q.table)
+							hasTable = true
+						}
 						sender.Float64Column(k, floatVal)
 					} else {
 						q.log.Errorf("could not parse %v into a number: %v", val, err)
@@ -454,7 +448,10 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				}
 			case float64:
 				// float64 is only needed if BENTHOS_USE_NUMBER=false
-				ensureTable()
+				if !hasTable {
+					sender.Table(q.table)
+					hasTable = true
+				}
 				sender.Float64Column(k, float64(val))
 			default:
 				q.log.Errorf("unsupported type %T for field %v", v, k)
@@ -475,7 +472,9 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 
 		if !hasTable {
 			if q.errorOnEmptyMessages {
-				return errors.New("empty message, skipping send to QuestDB")
+				err = errors.New("empty message, skipping send to QuestDB")
+				m.SetError(err)
+				return err
 			}
 			q.log.Warn("empty message, skipping send to QuestDB")
 			return nil
@@ -487,9 +486,23 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 			err = sender.AtNow(ctx)
 		}
 
+		if err != nil {
+			m.SetError(err)
+		}
 		return err
 	})
 
+	// This will flush the sender, no need to call sender.Flush at the end of the method
+	releaseErr := sender.Close(ctx)
+	if releaseErr != nil {
+		if err != nil {
+			err = fmt.Errorf("%v %w", err, releaseErr)
+		} else {
+			err = releaseErr
+		}
+	}
+
+	return err
 }
 
 func (q *questdbWriter) Close(ctx context.Context) error {

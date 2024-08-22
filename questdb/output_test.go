@@ -11,7 +11,6 @@ import (
 )
 
 func TestTimestampConversions(t *testing.T) {
-
 	testCases := []struct {
 		name         string
 		value        int64
@@ -76,7 +75,6 @@ func TestTimestampConversions(t *testing.T) {
 }
 
 func TestFromConf(t *testing.T) {
-
 	configSpec := questdbOutputConfig()
 	conf := `
 table: test
