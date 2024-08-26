@@ -58,23 +58,51 @@ func TestIntegrationQuestDB(t *testing.T) {
 		name         string
 		qdbConfig    string
 		payload      []string
-		validateFunc func(t *testing.T, pc *pgconn.PgConn)
+		query        string
+		validateFunc func(t *testing.T, pc *pgconn.ResultReader)
 	}{
 		{
 			"basicIngest",
 			"",
 			[]string{`{"hello": "world", "test": 1}`},
-			func(t *testing.T, pc *pgconn.PgConn) {
-				result := pc.ExecParams(ctx, "SELECT hello, test FROM 'basicIngest'", nil, nil, nil, nil)
-				assert.True(t, result.NextRow())
-				assert.Equal(t, 2, len(result.Values()))
-				assert.Equal(t, "world", string(result.Values()[0]))
-				assert.Equal(t, "1", string(result.Values()[1]))
+			"SELECT hello, test FROM 'basicIngest'",
+			func(t *testing.T, r *pgconn.ResultReader) {
+				assert.True(t, r.NextRow())
+				assert.Equal(t, 2, len(r.Values()))
+				assert.Equal(t, "world", string(r.Values()[0]))
+				assert.Equal(t, "1", string(r.Values()[1]))
 			},
 		},
+		{
+			"withDesignatedTimestamp",
+			"designatedTimestampField: timestamp",
+			[]string{`{"hello": "world", "timestamp": 10000000000 }`},
+			"SELECT timestamp FROM 'withDesignatedTimestamp'",
+			func(t *testing.T, r *pgconn.ResultReader) {
+				assert.True(t, r.NextRow())
+				assert.Equal(t, 1, len(r.Values()))
+				assert.Equal(t, "1970-04-26 17:46:40.000000", string(r.Values()[0]))
+			},
+		},
+		{
+			"withDesignatedTimestampUnit",
+			`designatedTimestampField: timestamp
+designatedTimestampUnit: millis`,
+			[]string{`{"hello": "world", "timestamp": 1 }`},
+			"SELECT timestamp FROM 'withDesignatedTimestampUnit'",
+			func(t *testing.T, r *pgconn.ResultReader) {
+				assert.True(t, r.NextRow())
+				assert.Equal(t, 1, len(r.Values()))
+				assert.Equal(t, "1970-01-01 00:00:00.001000", string(r.Values()[0]))
+			},
+		},
+		// todo: "withTimestampStringFields"
+		// todo: "withTimestampStringFormats"
+		// todo: "withDoubles" --> need to implement
+
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			//t.Parallel()
 
 			conf := fmt.Sprintf(
 				"address: \"%s\"\ntable: \"%s\"\n%s",
@@ -104,7 +132,10 @@ func TestIntegrationQuestDB(t *testing.T) {
 			require.NoError(t, err)
 			defer pgConn.Close(ctx)
 
-			tc.validateFunc(t, pgConn)
+			result := pgConn.ExecParams(ctx, tc.query, nil, nil, nil, nil)
+			tc.validateFunc(t, result)
+			_, err = result.Close()
+			assert.NoError(t, err)
 
 		})
 	}
