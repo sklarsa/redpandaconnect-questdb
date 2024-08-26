@@ -2,9 +2,7 @@ package questdb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strconv"
 	"testing"
 	"time"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/redpanda-data/benthos/v4/public/service"
 	"github.com/redpanda-data/benthos/v4/public/service/integration"
 )
 
@@ -36,6 +35,7 @@ func TestIntegrationQuestDB(t *testing.T) {
 		assert.NoError(t, pool.Purge(resource))
 	})
 
+	// Wait for QuestDB to boot up
 	if err = pool.Retry(func() error {
 		clientConfStr := fmt.Sprintf("http::addr=localhost:%v", resource.GetPort("9000/tcp"))
 		sender, err := qdb.LineSenderFromConf(ctx, clientConfStr)
@@ -54,40 +54,58 @@ func TestIntegrationQuestDB(t *testing.T) {
 
 	_ = resource.Expire(900)
 
-	template := `
-output:
-  questdb:
-    address: "localhost:$PORT"
-    table: $ID
-`
-	queryGetFn := func(ctx context.Context, testID, messageID string) (string, []string, error) {
-		pgConn, err := pgconn.Connect(ctx, fmt.Sprintf("postgresql://admin:quest@localhost:%v", resource.GetPort("8812/tcp")))
-		require.NoError(t, err)
-		defer pgConn.Close(ctx)
+	for _, tc := range []struct {
+		name         string
+		qdbConfig    string
+		payload      []string
+		validateFunc func(t *testing.T, pc *pgconn.PgConn)
+	}{
+		{
+			"basicIngest",
+			"",
+			[]string{`{"hello": "world", "test": 1}`},
+			func(t *testing.T, pc *pgconn.PgConn) {
+				result := pc.ExecParams(ctx, "SELECT hello, test FROM 'basicIngest'", nil, nil, nil, nil)
+				assert.True(t, result.NextRow())
+				assert.Equal(t, 2, len(result.Values()))
+				assert.Equal(t, "world", string(result.Values()[0]))
+				assert.Equal(t, "1", string(result.Values()[1]))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		result := pgConn.ExecParams(ctx, fmt.Sprintf("SELECT content, id FROM '%v' WHERE id=%v", testID, messageID), nil, nil, nil, nil)
+			conf := fmt.Sprintf(
+				"address: \"%s\"\ntable: \"%s\"\n%s",
+				fmt.Sprintf("localhost:%s", resource.GetPort("9000/tcp")),
+				tc.name,
+				tc.qdbConfig,
+			)
 
-		result.NextRow()
-		id, err := strconv.Atoi(string(result.Values()[1]))
-		assert.NoError(t, err)
-		data := map[string]any{
-			"content": string(result.Values()[0]),
-			"id":      id,
-		}
+			spec := questdbOutputConfig()
+			cfg, err := spec.ParseYAML(conf, service.NewEmptyEnvironment())
+			require.NoError(t, err)
+			out, _, _, err := fromConf(cfg, service.MockResources())
+			require.NoError(t, err)
 
-		assert.False(t, result.NextRow())
+			require.NoError(t, out.Connect(ctx))
 
-		outputBytes, err := json.Marshal(data)
-		require.NoError(t, err)
-		return string(outputBytes), nil, nil
+			qdbWriter, ok := out.(*questdbWriter)
+			require.True(t, ok)
+
+			batch := service.MessageBatch{}
+			for _, line := range tc.payload {
+				batch = append(batch, service.NewMessage([]byte(line)))
+			}
+			require.NoError(t, qdbWriter.WriteBatch(ctx, batch))
+
+			pgConn, err := pgconn.Connect(ctx, fmt.Sprintf("postgresql://admin:quest@localhost:%v", resource.GetPort("8812/tcp")))
+			require.NoError(t, err)
+			defer pgConn.Close(ctx)
+
+			tc.validateFunc(t, pgConn)
+
+		})
 	}
-
-	suite := integration.StreamTests(
-		integration.StreamTestOutputOnlySendSequential(10, queryGetFn),
-		integration.StreamTestOutputOnlySendBatch(10, queryGetFn),
-	)
-	suite.Run(
-		t, template,
-		integration.StreamTestOptPort(resource.GetPort("9000/tcp")),
-	)
 }
