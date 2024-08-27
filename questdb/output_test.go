@@ -1,7 +1,12 @@
 package questdb
 
 import (
+	"bufio"
+	"context"
+	"fmt"
 	"math"
+	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -11,6 +16,8 @@ import (
 )
 
 func TestTimestampConversions(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name         string
 		value        int64
@@ -75,6 +82,8 @@ func TestTimestampConversions(t *testing.T) {
 }
 
 func TestFromConf(t *testing.T) {
+	t.Parallel()
+
 	configSpec := questdbOutputConfig()
 	conf := `
 table: test
@@ -108,6 +117,8 @@ symbols:
 }
 
 func TestValidationErrorsFromConf(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name                string
 		conf                string
@@ -147,5 +158,102 @@ designatedTimestampUnit: hello`,
 			assert.ErrorContains(t, err, tc.expectedErrContains)
 
 		})
+	}
+}
+
+func TestOptionsOnWrite(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	sentMsgs := make(chan string, 5) // Arbitrary buffer size, > max number of test messages
+	t.Cleanup(func() { close(sentMsgs) })
+
+	listener, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	s := http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scanner := bufio.NewScanner(r.Body)
+			for scanner.Scan() {
+				println(scanner.Text())
+				sentMsgs <- scanner.Text()
+			}
+			assert.NoError(t, scanner.Err())
+			w.WriteHeader(200)
+		}),
+	}
+	t.Cleanup(func() { s.Shutdown(ctx) })
+	go func() {
+		s.Serve(listener)
+	}()
+
+	testCases := []struct {
+		name          string
+		extraConf     string
+		payload       []string
+		expectedLines []string
+	}{
+		{
+			name:          "withSymbols",
+			extraConf:     "symbols: ['hello']",
+			payload:       []string{`{"hello": "world", "test": 1}`},
+			expectedLines: []string{"withSymbols,hello=world test=1i"},
+		},
+		{
+			name:      "withDesignatedTimestamp",
+			extraConf: "designatedTimestampField: timestamp",
+			payload:   []string{`{"hello": "world", "timestamp": 1}`},
+			expectedLines: []string{
+				`withDesignatedTimestamp hello="world" 1000000000`,
+			},
+		},
+		{
+			name:      "withTimestampUnit",
+			extraConf: "designatedTimestampField: timestamp\ndesignatedTimestampUnit: nanos",
+			payload:   []string{`{"hello": "world", "timestamp": 1}`},
+			expectedLines: []string{
+				`withTimestampUnit hello="world" 1`,
+			},
+		},
+		{
+			name:      "withTimestampStringFields",
+			extraConf: "timestampStringFields: ['timestamp']\ntimestampStringFormat: 2006-02-01",
+			payload:   []string{`{"timestamp": "1970-01-02"}`},
+			expectedLines: []string{
+				`withTimestampStringFields timestamp=2678400000000t`,
+			},
+		},
+		{
+			name:      "withBoolValue",
+			extraConf: "timestampStringFields: ['timestamp']\ntimestampStringFormat: 2006-02-01",
+			payload:   []string{`{"hello": true}`},
+			expectedLines: []string{
+				`withBoolValue hello=t`,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		conf := fmt.Sprintf("address: 'localhost:%d'\n", listener.Addr().(*net.TCPAddr).Port)
+		conf += fmt.Sprintf("table: '%s'\n", tc.name)
+		conf += tc.extraConf
+
+		configSpec := questdbOutputConfig()
+
+		cfg, err := configSpec.ParseYAML(conf, nil)
+		require.NoError(t, err)
+		w, _, _, err := fromConf(cfg, service.MockResources())
+		require.NoError(t, err)
+
+		qdbWriter := w.(*questdbWriter)
+		batch := service.MessageBatch{}
+		for _, msg := range tc.payload {
+			batch = append(batch, service.NewMessage([]byte(msg)))
+		}
+		assert.NoError(t, qdbWriter.WriteBatch(ctx, batch))
+		for _, l := range tc.expectedLines {
+			assert.Equal(t, l, <-sentMsgs)
+		}
 	}
 }
