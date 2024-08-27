@@ -169,20 +169,18 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		}
 	}
 
-	if conf.Contains("tlsVerify") {
-		var tlsVerify string
-		if tlsVerify, err = conf.FieldString("tlsVerify"); err != nil {
-			return
-		}
-		switch tlsVerify {
-		case "on":
-			break
-		case "unsafe_off":
-			opts = append(opts, qdb.WithTlsInsecureSkipVerify())
-		default:
-			err = fmt.Errorf("invalid tlsVerify setting: %s", tlsVerify)
-			return
-		}
+	var tlsVerify string
+	if tlsVerify, err = conf.FieldString("tlsVerify"); err != nil {
+		return
+	}
+	switch tlsVerify {
+	case "on":
+		break
+	case "unsafe_off":
+		opts = append(opts, qdb.WithTlsInsecureSkipVerify())
+	default:
+		err = fmt.Errorf("invalid tlsVerify setting: %s", tlsVerify)
+		return
 	}
 
 	var addr string
