@@ -130,12 +130,13 @@ func questdbOutputConfig() *service.ConfigSpec {
 			service.NewStringListField("symbols").
 				Description("Columns that should be the SYMBOL type (string values default to STRING)").
 				Optional(),
+			service.NewStringListField("doubles").
+				Description("Columns that should be double type, (int is default)").
+				Optional(),
 			service.NewBoolField("errorOnEmptyMessages").
 				Description("Mark a message as errored if it is empty after field validation").
 				Optional().
 				Default(false),
-
-			// todo: add doubles
 		)
 }
 
@@ -145,6 +146,7 @@ type questdbWriter struct {
 	pool *qdb.LineSenderPool
 
 	symbols                  map[string]bool
+	doubles                  map[string]bool
 	table                    string
 	designatedTimestampField string
 	designatedTimestampUnit  timestampUnit
@@ -203,6 +205,7 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 	w := &questdbWriter{
 		log:                   mgr.Logger(),
 		symbols:               map[string]bool{},
+		doubles:               map[string]bool{},
 		timestampStringFields: map[string]bool{},
 	}
 	out = w
@@ -257,6 +260,16 @@ func fromConf(conf *service.ParsedConfig, mgr *service.Resources) (out service.B
 		}
 		for _, s := range symbols {
 			w.symbols[s] = true
+		}
+	}
+
+	var doubles []string
+	if conf.Contains("doubles") {
+		if doubles, err = conf.FieldStringList("doubles"); err != nil {
+			return
+		}
+		for _, d := range doubles {
+			w.doubles[d] = true
 		}
 	}
 
@@ -433,25 +446,29 @@ func (q *questdbWriter) WriteBatch(ctx context.Context, batch service.MessageBat
 				}
 				sender.BoolColumn(k, val)
 			case json.Number:
-				// For json numbers, first attempt to parse as int, then fall back to float
-				intVal, err := val.Int64()
-				if err == nil {
+				// For json numbers, assume int unless column is explicitly marked as a double
+				if _, isDouble := q.doubles[k]; isDouble {
+					floatVal, err := val.Float64()
+					if err != nil {
+						q.log.Errorf("could not parse %v into a double: %v", val, err)
+					}
+
+					if !hasTable {
+						sender.Table(q.table)
+						hasTable = true
+					}
+					sender.Float64Column(k, floatVal)
+				} else {
+					intVal, err := val.Int64()
+					if err != nil {
+						q.log.Errorf("could not parse %v into an int: %v", val, err)
+					}
+
 					if !hasTable {
 						sender.Table(q.table)
 						hasTable = true
 					}
 					sender.Int64Column(k, intVal)
-				} else {
-					floatVal, err := val.Float64()
-					if err == nil {
-						if !hasTable {
-							sender.Table(q.table)
-							hasTable = true
-						}
-						sender.Float64Column(k, floatVal)
-					} else {
-						q.log.Errorf("could not parse %v into a number: %v", val, err)
-					}
 				}
 			case float64:
 				// float64 is only needed if BENTHOS_USE_NUMBER=false

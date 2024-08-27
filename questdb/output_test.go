@@ -232,6 +232,14 @@ func TestOptionsOnWrite(t *testing.T) {
 				`withBoolValue hello=t`,
 			},
 		},
+		{
+			name:      "withDoubles",
+			extraConf: "doubles: ['hello']",
+			payload:   []string{`{"hello": 1.23}`},
+			expectedLines: []string{
+				`withDoubles hello=1.23`,
+			},
+		},
 	}
 
 	for _, tc := range testCases {
